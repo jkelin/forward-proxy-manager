@@ -380,7 +380,7 @@ func runClientAcquisitionScheduler(ctx context.Context) {
 
 	for {
 		waitFor := 100 * time.Millisecond
-		clientAcquisitionPq.Range(func(key, value any) bool {
+		clientAcquisitionPq.Range(func(key, value interface{}) bool {
 			priorityQueue := value.(pq.PriorityQueue)
 			for {
 				clientAcquisitionPqMutex.Lock()
