@@ -58,26 +58,22 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 	// Log proxying requests.
 	//log.Printf("INFO: Proxy: %s %s", req.Method, req.URL.String())
 
-	priority := 0.0
-	prioHeader, err := strconv.ParseFloat(req.Header.Get("x-priority"), 64)
+	priority := int64(0)
+	prioHeader, err := strconv.ParseInt(req.Header.Get("x-priority"), 10, 32)
 	if err == nil {
 		priority = prioHeader
 		req.Header.Del("x-priority")
 	}
 
-	cfg := RequestConfig{
-		Url:      req.URL.String(),
-		Method:   req.Method,
-		Priority: priority,
-	}
-	proxiedResp, err := makeProxiedRequest(cfg, req.Context())
+	_, respChan, err := initializeRequest(req.URL, priority, req.Context())
 	if err != nil {
-		if err.Error() == "context canceled" {
-			return nil
-		}
-
 		log.Printf("ERROR %s: %v", req.URL.String(), err)
 		return createStringResp("Proxy error", 500)
+	}
+
+	proxiedResp := <-respChan
+	if proxiedResp.Status == ResponseStatusRequestCancelled {
+		return nil
 	}
 
 	if proxiedResp.Status == ResponseStatusTimeout {
@@ -86,6 +82,10 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 
 	if proxiedResp.Status == ResponseStatusHostUnreachable {
 		return createStringResp("Remote host unreachable", 502)
+	}
+
+	if proxiedResp.Status == ResponseStatusHostUnreachable {
+		return createStringResp("Unknown error", 500)
 	}
 
 	reader := bytes.NewReader(proxiedResp.Body)

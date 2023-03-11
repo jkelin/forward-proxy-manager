@@ -51,6 +51,10 @@ func fetchHostInfo(host string) *HostInfo {
 	resp, err := client.Get("http://" + host)
 	info.supportsHttp = err == nil && resp.StatusCode != 426
 
+	if err != nil {
+		return &info
+	}
+
 	locationHeader := resp.Header.Get("Location")
 	if strings.Contains(locationHeader, "https://") {
 		info.supportsHttp = false

@@ -6,7 +6,6 @@ import (
 	"github.com/corpix/uarand"
 	"github.com/dustin/go-broadcast"
 	"github.com/inhies/go-bytesize"
-	pq "github.com/jupp0r/go-priority-queue"
 	"github.com/throttled/throttled"
 	"github.com/throttled/throttled/store/memstore"
 	"golang.org/x/net/http2"
@@ -24,12 +23,6 @@ import (
 	"time"
 )
 
-type RequestConfig struct {
-	Url      string
-	Method   string
-	Priority float64
-}
-
 type ProxyConfig struct {
 	host     string
 	port     int64
@@ -37,23 +30,7 @@ type ProxyConfig struct {
 	password string
 }
 
-type ResponseStatus int64
-
-const (
-	ResponseStatusOk ResponseStatus = iota
-	ResponseStatusTimeout
-	ResponseStatusHostUnreachable
-	ResponseStatusProxyUnreachable
-)
-
-type Response struct {
-	Status  ResponseStatus
-	Code    int
-	Body    []byte
-	Headers http.Header
-}
-
-func handleError(client *ProxyClient, req *RequestConfig, uri *url.URL, mainCtx context.Context, err error) (*Response, error) {
+func (client *ProxyClient) handleError(req *ActiveRequest, uri *url.URL, mainCtx context.Context, err error) (*Response, error) {
 	if mainCtx.Err() != nil {
 		return nil, mainCtx.Err()
 	}
@@ -73,24 +50,19 @@ func handleError(client *ProxyClient, req *RequestConfig, uri *url.URL, mainCtx 
 	}
 }
 
-func makeRequestWithClient(client *ProxyClient, host *HostInfo, req *RequestConfig, ctx context.Context, timeout time.Duration, priority float64) (*Response, error) {
+func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout time.Duration) (*Response, error) {
 	start := time.Now()
 
-	requestCtx, cancelFn := context.WithTimeout(ctx, timeout)
+	requestCtx, cancelFn := context.WithTimeout(req.Context, timeout)
 	defer cancelFn()
 
-	uri, err := url.Parse(req.Url)
-	if err != nil {
-		return nil, err
-	}
-
-	if host.supportsHttps {
-		uri.Scheme = "https"
+	if req.Host.supportsHttps {
+		req.Url.Scheme = "https"
 	} else {
-		uri.Scheme = "http"
+		req.Url.Scheme = "http"
 	}
 
-	request, err := http.NewRequest(req.Method, uri.String(), nil)
+	request, err := http.NewRequest(req.Method, req.Url.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -104,23 +76,23 @@ func makeRequestWithClient(client *ProxyClient, host *HostInfo, req *RequestConf
 	request = request.WithContext(requestCtx)
 
 	httpClient := client.httpClient
-	if host.supportsH2 {
+	if req.Host.supportsH2 {
 		httpClient = client.http2Client
 	}
 
 	resp, err := httpClient.Do(request)
 	if err != nil {
-		return handleError(client, req, uri, ctx, err)
+		return client.handleError(req, req.Url, req.Context, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return handleError(client, req, uri, ctx, err)
+		return client.handleError(req, req.Url, req.Context, err)
 	}
 
 	duration := time.Since(start)
-	log.Printf("%.0fp %s %s %s %d %s, %dms", priority, client.id, req.Method, uri.String(), resp.StatusCode, bytesize.New(float64(len(body))), duration.Milliseconds())
+	log.Printf("%dp %s %s %s %d %s, %dms", req.Priority, client.id, req.Method, req.Url.String(), resp.StatusCode, bytesize.New(float64(len(body))), duration.Milliseconds())
 
 	mainResponse := Response{
 		Status:  ResponseStatusOk,
@@ -138,6 +110,12 @@ func makeRequestWithClient(client *ProxyClient, host *HostInfo, req *RequestConf
 	}
 
 	return &mainResponse, nil
+}
+
+func (client *ProxyClient) markUnreachable() {
+	log.Printf("Marking client %s unrachable", client.id)
+	now := time.Now()
+	client.lastUnreachableAt = &now
 }
 
 func getFakeHeaders() http.Header {
@@ -192,16 +170,21 @@ type ProxyClient struct {
 	lastUnreachableAt *time.Time
 }
 
-var clients = make([]*ProxyClient, 0)
-var clientsMutex = sync.Mutex{}
-var newClientBroadcast = broadcast.NewBroadcaster(1)
+func (proxy *ProxyClient) RateLimit(host HostInfo) (bool, throttled.RateLimitResult, error) {
+	if proxy.lastUnreachableAt != nil && proxy.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry).Before(time.Now()) {
+		return false, throttled.RateLimitResult{
+			RetryAfter: time.Now().Sub(proxy.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry)),
+		}, nil
+	}
 
-func addNewClient(client *ProxyClient) {
-	clientsMutex.Lock()
-	defer clientsMutex.Unlock()
+	limited, result, err := proxy.limiter.RateLimit(host.host, 0)
+	if limited {
+		return limited, result, err
+	}
 
-	clients = append(clients, client)
-	newClientBroadcast.Submit(nil)
+	limited, result, err = proxy.limiter.RateLimit(host.host, 1)
+
+	return limited, result, err
 }
 
 func createLimiter() *throttled.GCRARateLimiter {
@@ -224,8 +207,19 @@ func createLimiter() *throttled.GCRARateLimiter {
 }
 
 func getExternalProxyIp(client *ProxyClient, ctx context.Context) (*string, error) {
+	uri, _ := url.Parse("https://ifconfig.io/ip")
 	ipConfigHostInfo := getHostInfo("ifconfig.io")
-	ipResp, err := makeRequestWithClient(client, ipConfigHostInfo, &RequestConfig{Method: "GET", Url: "https://ifconfig.io/ip"}, ctx, globalConfiguration.InitialIpInfoTimeout, 1337)
+	req := &ActiveRequest{
+		Id:       0,
+		Url:      uri,
+		Method:   "GET",
+		Priority: 10000,
+		Host:     *ipConfigHostInfo,
+		Context:  ctx,
+		Callback: nil,
+		Lock:     sync.Mutex{},
+	}
+	ipResp, err := client.makeRequestWithClient(req, globalConfiguration.InitialIpInfoTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +229,8 @@ func getExternalProxyIp(client *ProxyClient, ctx context.Context) (*string, erro
 	return &ip, nil
 }
 
+var proxyListChangedBroadcaster = broadcast.NewBroadcaster(1)
+
 func runProxyManager(ctx context.Context) {
 	proxies, err := getProxiesFromUrl(globalConfiguration.ProxyListUrl)
 	if err != nil {
@@ -242,6 +238,8 @@ func runProxyManager(ctx context.Context) {
 	}
 
 	proxyConnSemaphore := semaphore.NewWeighted(20)
+
+	readyProxies := make([]*ProxyClient, 0)
 
 	for _, config := range proxies {
 		err := proxyConnSemaphore.Acquire(ctx, 1)
@@ -310,204 +308,12 @@ func runProxyManager(ctx context.Context) {
 
 			log.Printf("Proxy %s ready", *ip)
 
-			addNewClient(&myClient)
+			readyProxies = append(readyProxies, &myClient)
+			proxiesToSend := make([]*ProxyClient, len(readyProxies))
+
+			copy(proxiesToSend, readyProxies)
+
+			proxyListChangedBroadcaster.Submit(proxiesToSend)
 		}(config)
 	}
-}
-
-func tryGetClient(host *HostInfo) (client *ProxyClient, retryAfter *time.Duration) {
-	clientsMutex.Lock()
-	defer clientsMutex.Unlock()
-
-	for {
-		var bestResult *throttled.RateLimitResult
-		for _, c := range clients {
-			if c.lastUnreachableAt != nil && c.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry).Before(time.Now()) {
-				continue
-			}
-
-			limited, result, err := c.limiter.RateLimit(host.host, 0)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if !limited && (bestResult == nil || result.Remaining > bestResult.Remaining) {
-				bestResult = &result
-				client = c
-				continue
-			}
-
-			if limited && (retryAfter == nil || result.RetryAfter < *retryAfter) {
-				retryAfter = &result.RetryAfter
-				continue
-			}
-		}
-
-		if client != nil {
-			limited, _, err := client.limiter.RateLimit(host.host, 1)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if limited {
-				continue
-			}
-		}
-
-		if retryAfter == nil {
-			minDuration := 1 * time.Second
-			retryAfter = &minDuration
-		}
-
-		return
-	}
-}
-
-var clientAcquisitionPq sync.Map
-var clientAcquisitionPqMutex sync.Mutex
-
-type clientAcquisitionRequest struct {
-	Callback chan *ProxyClient
-	HostInfo *HostInfo
-	Context  context.Context
-	Priority float64
-}
-
-func runClientAcquisitionScheduler(ctx context.Context) {
-	newClient := make(chan interface{})
-	newClientBroadcast.Register(newClient)
-	defer newClientBroadcast.Unregister(newClient)
-
-	for {
-		waitFor := 100 * time.Millisecond
-		clientAcquisitionPq.Range(func(key, value interface{}) bool {
-			priorityQueue := value.(pq.PriorityQueue)
-			for {
-				clientAcquisitionPqMutex.Lock()
-				item, err := priorityQueue.Pop()
-				clientAcquisitionPqMutex.Unlock()
-
-				if err != nil {
-					if err.Error() == "empty queue" {
-						break
-					}
-
-					log.Fatal(err)
-				}
-
-				req := item.(clientAcquisitionRequest)
-
-				if req.Context.Err() != nil {
-					continue
-				}
-
-				client, retryAfter := tryGetClient(req.HostInfo)
-
-				if client != nil {
-					req.Callback <- client
-				} else if *retryAfter < waitFor {
-					waitFor = *retryAfter
-
-					clientAcquisitionPqMutex.Lock()
-					priorityQueue.Insert(req, 1000-req.Priority)
-					clientAcquisitionPqMutex.Unlock()
-
-					break
-				}
-			}
-
-			return true
-		})
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-newClient:
-		case <-time.After(waitFor):
-			continue
-		}
-	}
-}
-
-func getClient(host *HostInfo, priority float64, ctx context.Context) (*ProxyClient, error) {
-	cb := make(chan *ProxyClient)
-	req := clientAcquisitionRequest{
-		Callback: cb,
-		HostInfo: host,
-		Context:  ctx,
-		Priority: priority,
-	}
-
-	clientAcquisitionPqMutex.Lock()
-	queue, _ := clientAcquisitionPq.LoadOrStore(host.host, pq.New())
-	priorityQueue := queue.(pq.PriorityQueue)
-	priorityQueue.Insert(req, 1000-priority)
-	clientAcquisitionPqMutex.Unlock()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case client := <-cb:
-			if client != nil {
-				return client, nil
-			}
-		}
-	}
-}
-
-func markClientUnreachable(client *ProxyClient) {
-	clientsMutex.Lock()
-	defer clientsMutex.Unlock()
-
-	log.Printf("Marking client %s unrachable", client.id)
-	now := time.Now()
-	client.lastUnreachableAt = &now
-}
-
-func makeProxiedRequest(cfg RequestConfig, ctx context.Context) (*Response, error) {
-	uri, err := url.Parse(cfg.Url)
-	if err != nil {
-		return nil, err
-	}
-
-	hostInfo := getHostInfo(uri.Hostname())
-	if !hostInfo.isOnline() {
-		return &Response{Status: ResponseStatusHostUnreachable}, nil
-	}
-
-	tries := 0
-	var resp *Response
-	for tries <= globalConfiguration.Retries {
-		client, err := getClient(hostInfo, cfg.Priority, ctx)
-		if err != nil {
-			return nil, err
-		}
-
-		timeout := globalConfiguration.RequestTimeout
-		if tries > 0 {
-			timeout = globalConfiguration.RetryTimeout
-		}
-
-		resp, err = makeRequestWithClient(client, hostInfo, &cfg, ctx, timeout, cfg.Priority)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.Status == ResponseStatusTimeout || resp.Status == ResponseStatusHostUnreachable || (resp.Status == ResponseStatusOk && resp.Code == 502) {
-			tries++
-			continue
-		} else if resp.Status == ResponseStatusProxyUnreachable {
-			markClientUnreachable(client)
-			continue
-		} else if resp.Code == 429 {
-			client.limiter.RateLimit(hostInfo.host, 100)
-			tries++
-			continue
-		} else {
-			break
-		}
-	}
-
-	return resp, nil
 }

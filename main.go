@@ -21,6 +21,7 @@ type GlobalConfiguration struct {
 	ThrottleRequestsPerMin int           `split_words:"true" default:"30"`
 	ThrottleRequestsBurst  int           `split_words:"true" default:"5"`
 	UnreachableClientRetry time.Duration `split_words:"true" default:"60s"`
+	EnableWeb              bool          `split_words:"true" default:"false"`
 }
 
 var globalConfiguration GlobalConfiguration
@@ -40,7 +41,10 @@ func main() {
 
 	go runProxyManager(ctx)
 	go runHttpProxy(ctx)
-	go runClientAcquisitionScheduler(ctx)
+	go runRequestScheduler(ctx)
+	if globalConfiguration.EnableWeb {
+		go runWeb(ctx)
+	}
 
 	c := make(chan os.Signal)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
