@@ -1,4 +1,4 @@
-FROM golang:1.16-alpine
+FROM golang:1.20-alpine
 
 WORKDIR /app
 
@@ -9,6 +9,7 @@ COPY go.sum ./
 RUN go mod download
 
 COPY *.go ./
+COPY templates /app/templates
 
 RUN go build -o /app-build
 
