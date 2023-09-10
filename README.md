@@ -69,8 +69,6 @@ const data = await got({
 
 ## Options
 
-Configuration
-
 Proxy Manager is configured with environment variables. You are only required to specify `PROXY_LIST_URL`.
 
 Refer to [main.go](main.go) for definitions.
