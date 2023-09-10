@@ -1,6 +1,6 @@
 # Forward Proxy Manager
 
-A proxy server that multiplexes your requests over a pool of proxies. It is made to easily scrape massive ammounts of pages on websites behind rate-limiters and other systems without expensive bot protection. Mainly Cloudflare on normal settings. It makes individual requests over random proxies from the pool, so it is best suited for unauthenticated sessions and public pages.
+A proxy server that distributes your requests over a pool of proxies. It is made to easily scrape massive ammounts of pages on websites behind rate-limiters and other systems without expensive bot protection. Mainly Cloudflare on normal settings. It makes individual requests over random proxies from the pool, so it is best suited for unauthenticated sessions and public pages.
 
 ## Features
 
