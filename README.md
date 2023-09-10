@@ -4,28 +4,30 @@ A proxy server that multiplexes your requests over a pool of proxies. It is made
 
 ## Features
 
-- Loads proxy list from an URL, checks proxies for availability
+- Fetches and validates proxy list from a given URL
 - Fakes user agent string and some headers to avoid bot detection
-- Your script communicates with the proxy manager over a HTTPS PROXY protocol which makes it a breeze to use with any language/library HTTP client
-- Supports HTTPS and HTTP2 on target server, tries to keep connections alive for maximal throughput
+- Interacts via HTTPS PROXY protocol for seamless integration with various HTTP clients.
+- Supports HTTPS, HTTP2, persistent connections for high performance
 - Keeps track of rate limits on individual proxy-target pairs and backs off on 429 (Too Many Requests) errors
-- Retries failed requests with a different proxy, up to a configured limit
-- Forwards most headers
-- Request priorities with `x-priority` header. Higher priority requests are processed first
-- Has a request queue so you can send as many requests as you want without worry of overloading the proxy manager or triggering rate limits
-- Optional web UI for monitoring and debugging pending requests
+- Retry mechanism for failed requests using alternative proxies
+- Forwards most headers from client to target
+- Adjustable request priority using `x-priority` header
+- Built-in request queue for bulk requests without rate limit concerns
+- Optional web dashboard for real-time monitoring of pending requests
 
 ## Usage
 
 ![Usage](docs/usage.svg)
 
-### 1. Run the Proxy Manager with Docker
+### 1. Set Up the Proxy Manager
+
+With Docker:
 
 ```bash
 docker run -it -p 8080:8080 -p 8081:8081 -e PROXY_LIST_URL=https://example.com/proxies ghcr.io/jkelin/forward-proxy-manager:latest
 ```
 
-Or with docker-compose:
+Using docker-compose:
 
 ```yaml
 version: "3.8"
@@ -39,11 +41,11 @@ services:
       PROXY_LIST_URL: https://example.com/proxies
 ```
 
-### 2. configure your HTTP client to use the proxy manager
+### 2. Integrate with HTTP Client
 
 Proxy Manager is a MITM proxy and uses self-signed certificate. You must configure your HTTP client to ignore certificate errors.
 
-[Got](https://github.com/sindresorhus/got) in Node.js:
+For [Got](https://github.com/sindresorhus/got) in Node.js:
 
 ```typescript
 import got from "got";
@@ -67,11 +69,11 @@ const data = await got({
 }).json();
 ```
 
+> Note: Since this proxy uses a self-signed certificate, you'll need to configure the HTTP client to ignore certificate validation.
+
 ## Options
 
-Proxy Manager is configured with environment variables. You are only required to specify `PROXY_LIST_URL`.
-
-Refer to [main.go](main.go) for definitions.
+Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [main.go](main.go).
 
 | Environment                 | Default      | Description                                                                                        |
 | --------------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
@@ -84,7 +86,7 @@ Refer to [main.go](main.go) for definitions.
 | `THROTTLE_REQUESTS_PER_MIN` | `30`         | Target host max requests per minute                                                                |
 | `THROTTLE_REQUESTS_BURST`   | `5`          | Max concurrent target requests for a single proxy                                                  |
 | `UNREACHABLE_CLIENT_RETRY`  | `60s`        | Retry for failing proxies                                                                          |
-| `ENABLE_WEB`                | `false`      | Enable web UI on `:8080` for monitoring and debugging pending requests                             |
+| `ENABLE_WEB`                | `false`      | Enable web UI on `:8081` for monitoring and debugging pending requests                             |
 
 ## Proxy list format
 
