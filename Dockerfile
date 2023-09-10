@@ -1,4 +1,4 @@
-FROM golang:1.20-alpine
+FROM golang:1.20-alpine  AS builder
 
 WORKDIR /app
 
@@ -11,8 +11,13 @@ RUN go mod download
 COPY *.go ./
 COPY templates /app/templates
 
-RUN go build -o /app-build
+RUN go build -o /build
+
+FROM alpine:latest AS production
+LABEL org.opencontainers.image.source="https://github.com/jkelin/forward-proxy-manager"
 
 EXPOSE 8080
+EXPOSE 8081
+CMD ["./main"]
 
-CMD [ "/app-build" ]
+COPY --from=builder /app .
