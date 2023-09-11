@@ -28,9 +28,9 @@ var globalConfiguration GlobalConfiguration
 
 func main() {
 	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file")
-	}
+	// if err != nil {
+	// 	log.Fatalf("Error loading .env file")
+	// }
 
 	err = envconfig.Process("", &globalConfiguration)
 	if err != nil {

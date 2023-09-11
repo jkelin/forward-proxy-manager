@@ -18,6 +18,6 @@ LABEL org.opencontainers.image.source="https://github.com/jkelin/forward-proxy-m
 
 EXPOSE 8080
 EXPOSE 8081
-CMD ["./main"]
+CMD ["./app"]
 
-COPY --from=builder /app .
+COPY --from=builder /build /app
