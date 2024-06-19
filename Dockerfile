@@ -9,6 +9,7 @@ COPY go.sum ./
 RUN go mod download
 
 COPY *.go ./
+COPY com.scrape-proxy /app/com.scrape-proxy
 COPY templates /app/templates
 
 RUN go build -o /build
