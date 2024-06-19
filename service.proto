@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+option go_package = "com.scrape-proxy";
+package proxy;
+
+service Proxy {
+  rpc SendRequest (ProxyRequest) returns (ProxyResponse) {}
+}
+
+message ProxyRequest {
+  string url = 1;
+  string method = 2;
+  map<string, string> headers = 3;
+  optional int64 priority = 4;
+  repeated uint32 retry_on_codes = 5;
+}
+
+message ProxyResponseSuccess {
+  int32 status = 1;
+  map<string, string> headers = 2;
+  optional bytes body = 3;
+}
+
+message ProxyResponseError {
+  enum ErrorType {
+    UNKNOWN = 0;
+    INVALID_URL = 1;
+    PROXY_ERROR = 2;
+    REMOTE_HOST_TIMED_OUT = 3;
+    REMOTE_HOST_UNREACHABLE = 4;
+  }
+
+  ErrorType error_type = 1;
+  optional bytes body = 2;
+}
+
+message ProxyResponse {
+  oneof response {
+    ProxyResponseSuccess success = 1;
+    ProxyResponseError error = 2;
+  }
+}

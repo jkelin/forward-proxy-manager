@@ -10,21 +10,21 @@
                     <table class="min-w-full divide-y divide-gray-300">
                         <thead>
                         <tr>
-                            <th scope="col" class="py-3.5 px-3 text-left text-sm font-semibold text-gray-900">Url</th>
                             <th scope="col" class="py-3.5 px-3 text-left text-sm font-semibold text-gray-900">Id</th>
                             <th scope="col" class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-0">Priority</th>
                             <th scope="col" class="py-3.5 px-3 text-left text-sm font-semibold text-gray-900">Status</th>
                             <th scope="col" class="py-3.5 px-3 text-left text-sm font-semibold text-gray-900">Retries</th>
+                            <th scope="col" class="py-3.5 px-3 text-left text-sm font-semibold text-gray-900">Url</th>
                         </tr>
                         </thead>
                         <tbody class="divide-y divide-gray-200">
                         {{range .Items}}
                             <tr>
-                                <td class="whitespace-nowrap py-4 px-3 text-sm text-gray-500">{{ .Url }}</td>
                                 <td class="whitespace-nowrap py-4 px-3 text-sm text-gray-500">{{ .Id }}</td>
                                 <td class="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-0">{{ .Priority }}</td>
                                 <td class="whitespace-nowrap py-4 px-3 text-sm text-gray-500">{{ .Status }}</td>
                                 <td class="whitespace-nowrap py-4 px-3 text-sm text-gray-500">{{ .Retries }}</td>
+                                <td class="whitespace-nowrap py-4 px-3 text-sm text-gray-500">{{ .Url }}</td>
                             </tr>
                         {{end}}
                         </tbody>

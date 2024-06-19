@@ -41,6 +41,7 @@ func main() {
 
 	go runProxyManager(ctx)
 	go runHttpProxy(ctx)
+	go runGrpcProxy(ctx)
 	go runRequestScheduler(ctx)
 	if globalConfiguration.EnableWeb {
 		go runWeb(ctx)

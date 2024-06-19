@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/corpix/uarand"
 	"github.com/dustin/go-broadcast"
 	"github.com/inhies/go-bytesize"
 	"github.com/throttled/throttled"
@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/semaphore"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -41,11 +42,12 @@ func (client *ProxyClient) handleError(req *ActiveRequest, uri *url.URL, mainCtx
 		}, nil
 	}
 
-	if e, ok := err.(*net.OpError); ok && e.Op == "socks connect" {
+	var e *net.OpError
+	if errors.As(err, &e) && e.Op == "socks connect" {
 		log.Printf("%s %s %s %s", client.id, req.Method, uri.String(), "Proxy unreachable")
 		return &Response{Status: ResponseStatusProxyUnreachable}, nil
 	} else {
-		log.Printf("%s %s %s %s", client.id, req.Method, uri.String(), err.Error())
+		log.Printf("%s %s %s %v", client.id, req.Method, uri.String(), err.Error())
 		return nil, err
 	}
 }
@@ -84,7 +86,12 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 	if err != nil {
 		return client.handleError(req, req.Url, req.Context, err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing body in makeRequestWithClient: %v", err)
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -121,12 +128,57 @@ func (client *ProxyClient) markUnreachable() {
 func getFakeHeaders() http.Header {
 	headers := http.Header{}
 
-	headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	headers.Set("Accept-Language", "en-US,en;q=0.5")
-	headers.Set("User-Agent", uarand.GetRandom())
+	acceptLanguage := "en-US,en;q=0.5"
+
+	if rand.Float32() > 0.3 {
+		languages := []string{"cs", "de", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "zh"}
+		acceptLanguage = fmt.Sprintf("en-US,en;q=0.9,%s;q=0.8", languages[rand.Intn(len(languages))])
+	}
+
+	if rand.Float32() > 0.8 {
+		// firefox headers
+		headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+		headers.Set("Accept-Language", acceptLanguage)
+
+		if rand.Float32() > 0.8 {
+			headers.Set("Dnt", "1")
+		}
+
+		headers.Set("Sec-Fetch-Dest", `document`)
+		headers.Set("Sec-Fetch-Mode", `navigate`)
+		headers.Set("Sec-Fetch-Site", `none`)
+		headers.Set("Sec-Fetch-User", `?1`)
+		headers.Set("Upgrade-Insecure-Requests", `1`)
+
+		version := 120 + rand.Intn(5)
+
+		headers.Set("User-Agent", fmt.Sprintf(`Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:%d.0) Gecko/20100101 Firefox/%d.0`, version, version))
+	} else {
+		// chrome
+		headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		headers.Set("Accept-Language", acceptLanguage)
+
+		if rand.Float32() > 0.2 {
+			headers.Set("Dnt", "1")
+		}
+
+		version := 120 + rand.Intn(5)
+
+		headers.Set("Sec-Ch-Ua", fmt.Sprintf(`"Google Chrome";v="%d", "Not:A-Brand";v="8", "Chromium";v="%d"`, version, version))
+		headers.Set("Sec-Ch-Ua-Mobile", `?0`)
+		headers.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+		headers.Set("Sec-Fetch-Dest", `document`)
+		headers.Set("Sec-Fetch-Mode", `navigate`)
+		headers.Set("Sec-Fetch-Site", `none`)
+		headers.Set("Sec-Fetch-User", `?1`)
+		headers.Set("Upgrade-Insecure-Requests", `1`)
+		headers.Set("User-Agent", fmt.Sprintf(`Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36`, version))
+	}
 
 	return headers
 }
+
+var proxyRegex = regexp.MustCompile(`(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3}):(\d{1,5}):(.+?):(.+)(\r\n)`)
 
 func getProxiesFromUrl(url string) ([]ProxyConfig, error) {
 	resp, err := http.Get(url)
@@ -134,14 +186,18 @@ func getProxiesFromUrl(url string) ([]ProxyConfig, error) {
 		return nil, err
 	}
 
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Printf("Error closing body in getProxiesFromUrl: %v", err)
+		}
+	}(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	rxp := regexp.MustCompile(`(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3}):(\d{1,5}):(.+?):(.+)(\r\n)`)
-	matches := rxp.FindAllStringSubmatch(string(body), -1)
+	matches := proxyRegex.FindAllStringSubmatch(string(body), -1)
 
 	res := make([]ProxyConfig, 0)
 	for _, v := range matches {
@@ -170,19 +226,19 @@ type ProxyClient struct {
 	lastUnreachableAt *time.Time
 }
 
-func (proxy *ProxyClient) RateLimit(host HostInfo) (bool, throttled.RateLimitResult, error) {
-	if proxy.lastUnreachableAt != nil && proxy.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry).Before(time.Now()) {
+func (client *ProxyClient) RateLimit(host HostInfo) (bool, throttled.RateLimitResult, error) {
+	if client.lastUnreachableAt != nil && client.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry).Before(time.Now()) {
 		return false, throttled.RateLimitResult{
-			RetryAfter: time.Now().Sub(proxy.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry)),
+			RetryAfter: time.Now().Sub(client.lastUnreachableAt.Add(globalConfiguration.UnreachableClientRetry)),
 		}, nil
 	}
 
-	limited, result, err := proxy.limiter.RateLimit(host.host, 0)
+	limited, result, err := client.limiter.RateLimit(host.host, 0)
 	if limited {
 		return limited, result, err
 	}
 
-	limited, result, err = proxy.limiter.RateLimit(host.host, 1)
+	limited, result, err = client.limiter.RateLimit(host.host, 1)
 
 	return limited, result, err
 }
@@ -271,7 +327,7 @@ func runProxyManager(ctx context.Context) {
 
 			err = http2.ConfigureTransport(http2Transport)
 			if err != nil {
-				fmt.Println("error upgrading proxy to http2:", err)
+				log.Printf("error upgrading proxy to http2: %v", err)
 				return
 			}
 

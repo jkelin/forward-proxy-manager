@@ -1,12 +1,13 @@
 # Forward Proxy Manager
 
-A proxy server that distributes your requests over a pool of proxies. It is made to easily scrape massive ammounts of pages on websites behind rate-limiters and other systems without expensive bot protection. Mainly Cloudflare on normal settings. It makes individual requests over random proxies from the pool, so it is best suited for unauthenticated sessions and public pages.
+A proxy server that distributes your requests over a pool of proxies. It is made to easily scrape massive amounts of pages on websites behind rate-limiters and other systems without expensive bot protection. Mainly Cloudflare on normal settings. It makes individual requests over random proxies from the pool, so it is best suited for unauthenticated sessions and public pages.
 
 ## Features
 
 - Fetches and validates proxy list from a given URL
 - Fakes user agent string and some headers to avoid bot detection
 - Interacts via HTTPS PROXY protocol for seamless integration with various HTTP clients.
+- Also has a gRPC interface for more advanced use cases
 - Supports HTTPS, HTTP2, persistent connections for high performance
 - Keeps track of rate limits on individual proxy-target pairs and backs off on 429 (Too Many Requests) errors
 - Retry mechanism for failed requests using alternative proxies
@@ -100,3 +101,9 @@ Example:
 127.0.0.1:1080:username:password
 127.0.0.2:1080:username:password
 ```
+
+## gRPC Proxy
+
+Forward Proxy Manager also provides a gRPC proxy for more advanced use cases. It is available on `:8082`. Schema definition can be found in [service.proto](service.proto).
+
+Currently no client libraries are available.

@@ -65,7 +65,9 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 		req.Header.Del("x-priority")
 	}
 
-	_, respChan, err := initializeRequest(req.URL, priority, req.Context())
+	retryOnCodes := make([]uint16, 0)
+
+	_, respChan, err := initializeRequest(req.URL, priority, retryOnCodes, req.Context())
 	if err != nil {
 		log.Printf("ERROR %s: %v", req.URL.String(), err)
 		return createStringResp("Proxy error", 500)
@@ -82,10 +84,6 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 
 	if proxiedResp.Status == ResponseStatusHostUnreachable {
 		return createStringResp("Remote host unreachable", 502)
-	}
-
-	if proxiedResp.Status == ResponseStatusHostUnreachable {
-		return createStringResp("Unknown error", 500)
 	}
 
 	reader := bytes.NewReader(proxiedResp.Body)

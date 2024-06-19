@@ -39,23 +39,29 @@ type Response struct {
 }
 
 type ActiveRequest struct {
-	Id       uint64
-	Url      *url.URL
-	Method   string
-	Priority int64
-	Host     HostInfo
-	Status   RequestStatus
-	Retries  uint32
-	Context  context.Context
-	Callback chan<- *Response
-	Lock     sync.Mutex
+	Id           uint64
+	Url          *url.URL
+	Method       string
+	Priority     int64
+	Host         HostInfo
+	Status       RequestStatus
+	Retries      uint32
+	Context      context.Context
+	Callback     chan<- *Response
+	Lock         sync.Mutex
+	RetryOnCodes []uint16
 }
 
 var requestCounter uint64 = 0
 var newRequestsBroacast = broadcast.NewBroadcaster(1)
 var requestFinishedBroacast = broadcast.NewBroadcaster(1)
 
-func initializeRequest(uri *url.URL, priority int64, ctx context.Context) (*ActiveRequest, <-chan *Response, error) {
+func initializeRequest(
+	uri *url.URL,
+	priority int64,
+	retryOnCodes []uint16,
+	ctx context.Context,
+) (*ActiveRequest, <-chan *Response, error) {
 	hostInfo := getHostInfo(uri.Hostname())
 	if !hostInfo.isOnline() {
 		return nil, nil, errors.New("host is not reachable")
@@ -65,15 +71,16 @@ func initializeRequest(uri *url.URL, priority int64, ctx context.Context) (*Acti
 	callback := make(chan *Response, 1)
 
 	req := &ActiveRequest{
-		Id:       requestCounter - 1,
-		Url:      uri,
-		Method:   "GET",
-		Priority: priority,
-		Host:     *hostInfo,
-		Status:   RequestStatus(RequestStatusPending),
-		Retries:  0,
-		Callback: callback,
-		Context:  ctx,
+		Id:           requestCounter - 1,
+		Url:          uri,
+		Method:       "GET",
+		Priority:     priority,
+		Host:         *hostInfo,
+		Status:       RequestStatus(RequestStatusPending),
+		Retries:      0,
+		Callback:     callback,
+		Context:      ctx,
+		RetryOnCodes: retryOnCodes,
 	}
 
 	newRequestsBroacast.Submit(req)
@@ -87,56 +94,76 @@ func (request *ActiveRequest) executeAt(proxy *ProxyClient) {
 	request.Lock.Unlock()
 
 	resp, err := proxy.makeRequestWithClient(request, globalConfiguration.RequestTimeout)
+
+	request.Lock.Lock()
+	defer request.Lock.Unlock()
+	defer func() {
+		if request.Status == RequestStatus(RequestStatusPending) {
+			newRequestsBroacast.Submit(request)
+		} else {
+			requestFinishedBroacast.Submit(request)
+		}
+	}()
+
+	retry := false
+
 	if err != nil {
-		if err.Error() == "context canceled" {
+		if urlErr, ok := err.(*url.Error); ok && urlErr.Err.Error() == "EOF" {
+			retry = true
+		} else if err.Error() == "context canceled" {
 			request.Callback <- &Response{
 				Status: ResponseStatusRequestCancelled,
 			}
+
+			return
 		} else {
-			println(err.Error())
+			log.Printf("UNKNOWN ERROR %s: %v", request.Url, err)
 			request.Callback <- &Response{
 				Status: ResponseStatusUnknownError,
 			}
+
+			return
 		}
+	} else {
+		if resp.Status == ResponseStatusTimeout || resp.Status == ResponseStatusHostUnreachable || (resp.Status == ResponseStatusOk && resp.Code == 502) || (resp.Status == ResponseStatusOk && resp.Code == 0) {
+			retry = true
+		} else if resp.Status == ResponseStatusProxyUnreachable {
+			proxy.markUnreachable()
+
+			request.Status = RequestStatus(RequestStatusPending)
+
+			return
+		} else if resp.Code == 429 {
+			_, _, err = proxy.limiter.RateLimit(request.Host.host, 100)
+			if err != nil {
+				log.Printf("UNKNOWN ERROR in rateLimiter %s: %v", request.Url, err)
+
+				request.Callback <- &Response{
+					Status: ResponseStatusUnknownError,
+				}
+
+				return
+			}
+
+			retry = true
+		}
+
+		for _, code := range request.RetryOnCodes {
+			if resp.Code == int(code) {
+				retry = true
+				break
+			}
+		}
+	}
+
+	if retry && int(request.Retries) < globalConfiguration.Retries {
+		request.Retries = request.Retries + 1
+		request.Status = RequestStatus(RequestStatusPending)
 
 		return
 	}
 
-	request.Lock.Lock()
-	defer request.Lock.Unlock()
-
-	retry := false
-
-	if resp.Status == ResponseStatusTimeout || resp.Status == ResponseStatusHostUnreachable || (resp.Status == ResponseStatusOk && resp.Code == 502) {
-		retry = true
-	} else if resp.Status == ResponseStatusProxyUnreachable {
-		proxy.markUnreachable()
-		request.Status = RequestStatus(RequestStatusPending)
-
-		newRequestsBroacast.Submit(request)
-	} else if resp.Code == 429 {
-		proxy.limiter.RateLimit(request.Host.host, 100)
-		retry = true
-	} else {
-		request.Status = RequestStatus(RequestStatusFinished)
-
-		request.Callback <- resp
-		requestFinishedBroacast.Submit(request)
-	}
-
-	if retry {
-		if request.Retries < 3 {
-			request.Retries = request.Retries + 1
-			request.Status = RequestStatus(RequestStatusPending)
-
-			newRequestsBroacast.Submit(request)
-		} else {
-			request.Status = RequestStatus(RequestStatusFinished)
-
-			request.Callback <- resp
-			requestFinishedBroacast.Submit(request)
-		}
-	}
+	request.Callback <- resp
 }
 
 func runRequestScheduler(ctx context.Context) {
