@@ -25,7 +25,7 @@ A proxy server that distributes your requests over a pool of proxies. It is made
 With Docker:
 
 ```bash
-docker run -it -p 8080:8080 -p 8081:8081 -e PROXY_LIST_URL=https://example.com/proxies ghcr.io/jkelin/forward-proxy-manager:latest
+docker run -it -p 8080:8080 -p 8081:8081 -p 8082:8082 -e PROXY_LIST_URL=https://example.com/proxies ghcr.io/jkelin/forward-proxy-manager:latest
 ```
 
 Using docker-compose:
@@ -38,6 +38,7 @@ services:
     ports:
       - 8080:8080
       - 8081:8081
+      - 8082:8082
     environment:
       PROXY_LIST_URL: https://example.com/proxies
 ```
