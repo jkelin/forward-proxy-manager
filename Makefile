@@ -9,3 +9,4 @@ publish: build
 
 codegen:
 	protoc --go_out=src --go-grpc_out=src service.proto
+	cd client-node && yarn codegen
