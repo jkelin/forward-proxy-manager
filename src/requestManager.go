@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/dustin/go-broadcast"
-	"github.com/google/btree"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/dustin/go-broadcast"
+	"github.com/google/btree"
 )
 
 type ResponseStatus int64
@@ -166,6 +168,18 @@ func (request *ActiveRequest) executeAt(proxy *ProxyClient) {
 	request.Callback <- resp
 }
 
+// shuffleIndices returns a slice of indices in random order
+func shuffleIndices(length int) []int {
+	indices := make([]int, length)
+	for i := range indices {
+		indices[i] = i
+	}
+	rand.Shuffle(length, func(i, j int) {
+		indices[i], indices[j] = indices[j], indices[i]
+	})
+	return indices
+}
+
 func runRequestScheduler(ctx context.Context) {
 	pq := btree.NewG[*ActiveRequest](32, func(a, b *ActiveRequest) bool {
 		if a.Priority != b.Priority {
@@ -211,7 +225,8 @@ func runRequestScheduler(ctx context.Context) {
 				return true
 			}
 
-			for _, proxy := range proxies {
+			for _, idx := range shuffleIndices(len(proxies)) {
+				proxy := proxies[idx]
 				limited, result, err := proxy.RateLimit(item.Host)
 				if err != nil {
 					log.Fatal(err)

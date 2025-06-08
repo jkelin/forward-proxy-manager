@@ -4,7 +4,6 @@ go 1.19
 
 require (
 	github.com/ReneKroon/ttlcache v1.7.0
-	github.com/corpix/uarand v0.2.0
 	github.com/dustin/go-broadcast v0.0.0-20211018055107-71439988bd91
 	github.com/go-httpproxy/httpproxy v0.0.0-20180417134941-6977c68bf38e
 	github.com/gofiber/fiber/v2 v2.42.0
@@ -32,6 +31,7 @@ require (
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/savsgio/dictpool v0.0.0-20221023140959-7bf2e61cea94 // indirect
 	github.com/savsgio/gotils v0.0.0-20220530130905-52f3993e8d6d // indirect
+	github.com/stretchr/testify v1.7.1 // indirect
 	github.com/tinylib/msgp v1.1.6 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.44.0 // indirect
