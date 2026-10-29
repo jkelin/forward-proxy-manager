@@ -5,13 +5,13 @@ A proxy server that distributes your requests over a pool of proxies. It is made
 ## Features
 
 - Fetches and validates proxy list from a given URL
-- Fakes user agent string and some headers to avoid bot detection
+- Impersonates real Chrome/Firefox: each proxy gets one browser identity whose TLS (JA3/JA4), HTTP/2 settings and header order match its user agent
 - Interacts via HTTPS PROXY protocol for seamless integration with various HTTP clients.
 - Also has a gRPC interface for more advanced use cases
 - Supports HTTPS, HTTP2, persistent connections for high performance
 - Keeps track of rate limits on individual proxy-target pairs and backs off on 429 (Too Many Requests) errors
 - Retry mechanism for failed requests using alternative proxies
-- Forwards most headers from client to target
+- Replaces client headers with the identity's browser navigation headers; decodes gzip/deflate/br/zstd bodies
 - Adjustable request priority using `x-priority` header
 - Built-in request queue for bulk requests without rate limit concerns
 - Optional web dashboard for real-time monitoring of pending requests
@@ -77,18 +77,21 @@ const data = await got({
 
 Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [main.go](main.go).
 
-| Environment                 | Default      | Description                                                                                        |
-| --------------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
-| `PROXY_LIST_URL`            | **REQUIRED** | URL from which to download the proxy list. Refer to proxy list format below                        |
-| `REQUEST_TIMEOUT`           | `20s`        | Timeout for individual requests to target host                                                     |
-| `RETRIES`                   | `1`          | Number of times to retry failed requests to target                                                 |
-| `RETRY_TIMEOUT`             | `5s`         | Timeout subsequent requests to target                                                              |
-| `INITIAL_IP_INFO_TIMEOUT`   | `10s`        | Timeout for proxy IP info request used to check proxy availability                                 |
-| `HOST_INFO_REQUEST_TIMEOUT` | `5s`         | Timeout for host info request which we need to get information about HTTPS/HTTP2/IPV6 availability |
-| `THROTTLE_REQUESTS_PER_MIN` | `30`         | Target host max requests per minute                                                                |
-| `THROTTLE_REQUESTS_BURST`   | `5`          | Max concurrent target requests for a single proxy                                                  |
-| `UNREACHABLE_CLIENT_RETRY`  | `60s`        | Retry for failing proxies                                                                          |
-| `ENABLE_WEB`                | `false`      | Enable web UI on `:8081` for monitoring and debugging pending requests                             |
+| Environment                 | Default      | Description                                                                                       |
+| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
+| `PROXY_LIST_URL`            | **REQUIRED** | URL from which to download the proxy list. Refer to proxy list format below                       |
+| `REQUEST_TIMEOUT`           | `20s`        | Timeout for individual requests to target host                                                    |
+| `RETRIES`                   | `1`          | Number of times to retry failed requests to target                                                |
+| `RETRY_TIMEOUT`             | `5s`         | Timeout subsequent requests to target                                                             |
+| `INITIAL_IP_INFO_TIMEOUT`   | `10s`        | Timeout for proxy IP info request used to check proxy availability                                |
+| `HOST_INFO_REQUEST_TIMEOUT` | `5s`         | Timeout for host info request which we need to get information about HTTP/HTTPS/IPV6 availability |
+| `THROTTLE_REQUESTS_PER_MIN` | `30`         | Target host max requests per minute                                                               |
+| `THROTTLE_REQUESTS_BURST`   | `5`          | Max concurrent target requests for a single proxy                                                 |
+| `UNREACHABLE_CLIENT_RETRY`  | `60s`        | Retry for failing proxies                                                                         |
+| `ENABLE_WEB`                | `false`      | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                         |
+| `PROXY_PORT`                | `8080`       | HTTP(S) proxy listen port                                                                         |
+| `WEB_PORT`                  | `8081`       | Web UI listen port                                                                                |
+| `GRPC_PORT`                 | `8082`       | gRPC listen port                                                                                  |
 
 ## Proxy list format
 

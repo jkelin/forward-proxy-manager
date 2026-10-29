@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"math"
@@ -103,7 +104,7 @@ func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.Prox
 
 func runGrpcProxy(ctx context.Context) {
 	flag.Parse()
-	lis, err := net.Listen("tcp", ":8082")
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", globalConfiguration.GrpcPort))
 	if err != nil {
 		log.Fatalf("failed to start gprc server: %v", err)
 	}

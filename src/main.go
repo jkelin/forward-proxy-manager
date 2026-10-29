@@ -22,6 +22,9 @@ type GlobalConfiguration struct {
 	ThrottleRequestsBurst  int           `split_words:"true" default:"5"`
 	UnreachableClientRetry time.Duration `split_words:"true" default:"60s"`
 	EnableWeb              bool          `split_words:"true" default:"false"`
+	ProxyPort              uint16        `split_words:"true" default:"8080"`
+	WebPort                uint16        `split_words:"true" default:"8081"`
+	GrpcPort               uint16        `split_words:"true" default:"8082"`
 }
 
 var globalConfiguration GlobalConfiguration

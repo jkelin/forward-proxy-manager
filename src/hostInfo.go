@@ -2,7 +2,6 @@ package main
 
 import (
 	"github.com/ReneKroon/ttlcache"
-	"golang.org/x/net/http2"
 	"net"
 	"net/http"
 	"strings"
@@ -15,7 +14,6 @@ type HostInfo struct {
 	host          string
 	supportsHttp  bool
 	supportsHttps bool
-	supportsH2    bool
 	supportsIPv4  bool
 	supportsIPv6  bool
 }
@@ -63,21 +61,11 @@ func fetchHostInfo(host string) *HostInfo {
 	_, err = client.Get("https://" + host)
 	info.supportsHttps = err == nil
 
-	transport := &http2.Transport{}
-	client = &http.Client{Transport: transport, Timeout: globalConfiguration.HostInfoRequestTimeout}
-	h2Url := "https://" + host
-	if !info.supportsHttps {
-		h2Url = "http://" + host
-	}
-
-	_, err = client.Get(h2Url)
-	info.supportsH2 = err == nil
-
 	return &info
 }
 
 func (info HostInfo) isOnline() bool {
-	return (info.supportsIPv4 || info.supportsIPv6) && (info.supportsHttp || info.supportsH2 || info.supportsHttps)
+	return (info.supportsIPv4 || info.supportsIPv6) && (info.supportsHttp || info.supportsHttps)
 }
 
 func getHostInfo(host string) *HostInfo {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/go-httpproxy/httpproxy"
 	"io"
 	"log"
@@ -123,7 +124,7 @@ func runHttpProxy(ctx context.Context) {
 	prx.OnConnect = OnConnect
 	prx.OnRequest = OnRequest
 
-	err := http.ListenAndServe(":8080", prx)
+	err := http.ListenAndServe(fmt.Sprintf(":%d", globalConfiguration.ProxyPort), prx)
 	if err != nil {
 		log.Fatalf("Failed to start proxy server: %v", err)
 	}

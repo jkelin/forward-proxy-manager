@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
 	"html/template"
 	"sort"
 	"sync"
@@ -111,7 +112,7 @@ func runWeb(ctx context.Context) {
 		return nil
 	})
 
-	err = app.Listen(":8081")
+	err = app.Listen(fmt.Sprintf(":%d", globalConfiguration.WebPort))
 	if err != nil {
 		panic(err)
 	}

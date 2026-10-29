@@ -3,17 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
-	"github.com/dustin/go-broadcast"
-	"github.com/inhies/go-bytesize"
-	"github.com/throttled/throttled"
-	"github.com/throttled/throttled/store/memstore"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/proxy"
-	"golang.org/x/sync/semaphore"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +13,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	fhttp "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/dustin/go-broadcast"
+	"github.com/inhies/go-bytesize"
+	"github.com/throttled/throttled"
+	"github.com/throttled/throttled/store/memstore"
+	"golang.org/x/sync/semaphore"
 )
 
 type ProxyConfig struct {
@@ -64,36 +63,33 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 		req.Url.Scheme = "http"
 	}
 
-	request, err := http.NewRequest(req.Method, req.Url.String(), nil)
+	req.Url.Host = withoutDefaultPort(req.Url)
+
+	request, err := fhttp.NewRequestWithContext(requestCtx, req.Method, req.Url.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	for key, values := range client.headers {
-		for _, value := range values {
-			request.Header.Add(key, value)
-		}
-	}
+	request.Header = client.headers.Clone()
 
-	request = request.WithContext(requestCtx)
-
-	httpClient := client.httpClient
-	if req.Host.supportsH2 {
-		httpClient = client.http2Client
-	}
-
-	resp, err := httpClient.Do(request)
+	// tls-client negotiates h2/http1.1 via the profile's ALPN, like the impersonated browser.
+	resp, err := client.httpClient.Do(request)
 	if err != nil {
 		return client.handleError(req, req.Url, req.Context, err)
 	}
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
 			log.Printf("Error closing body in makeRequestWithClient: %v", err)
 		}
-	}(resp.Body)
+	}()
 
-	body, err := io.ReadAll(resp.Body)
+	// Fake headers set Accept-Encoding explicitly, so the transport leaves the body encoded unless it reports otherwise.
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	if resp.Uncompressed {
+		contentEncoding = ""
+	}
+
+	body, err := decodeResponseBody(resp.Body, contentEncoding)
 	if err != nil {
 		return client.handleError(req, req.Url, req.Context, err)
 	}
@@ -119,63 +115,28 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 	return &mainResponse, nil
 }
 
+// withoutDefaultPort drops the scheme's default port, as browsers omit it from Host/:authority.
+// MITM CONNECT targets arrive as "host:443", which would otherwise leak as ":authority: host:443".
+// Edge cases: non-default ports are kept; IPv6 literals keep their brackets.
+func withoutDefaultPort(target *url.URL) string {
+	port := target.Port()
+	isDefaultPort := (target.Scheme == "https" && port == "443") || (target.Scheme == "http" && port == "80")
+	if !isDefaultPort {
+		return target.Host
+	}
+
+	hostname := target.Hostname()
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]"
+	}
+
+	return hostname
+}
+
 func (client *ProxyClient) markUnreachable() {
 	log.Printf("Marking client %s unrachable", client.id)
 	now := time.Now()
 	client.lastUnreachableAt = &now
-}
-
-func getFakeHeaders() http.Header {
-	headers := http.Header{}
-
-	acceptLanguage := "en-US,en;q=0.5"
-
-	if rand.Float32() > 0.3 {
-		languages := []string{"cs", "de", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "ru", "tr", "zh"}
-		acceptLanguage = fmt.Sprintf("en-US,en;q=0.9,%s;q=0.8", languages[rand.Intn(len(languages))])
-	}
-
-	if rand.Float32() > 0.8 {
-		// firefox headers
-		headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-		headers.Set("Accept-Language", acceptLanguage)
-
-		if rand.Float32() > 0.8 {
-			headers.Set("Dnt", "1")
-		}
-
-		headers.Set("Sec-Fetch-Dest", `document`)
-		headers.Set("Sec-Fetch-Mode", `navigate`)
-		headers.Set("Sec-Fetch-Site", `none`)
-		headers.Set("Sec-Fetch-User", `?1`)
-		headers.Set("Upgrade-Insecure-Requests", `1`)
-
-		version := 120 + rand.Intn(5)
-
-		headers.Set("User-Agent", fmt.Sprintf(`Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:%d.0) Gecko/20100101 Firefox/%d.0`, version, version))
-	} else {
-		// chrome
-		headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-		headers.Set("Accept-Language", acceptLanguage)
-
-		if rand.Float32() > 0.2 {
-			headers.Set("Dnt", "1")
-		}
-
-		version := 120 + rand.Intn(5)
-
-		headers.Set("Sec-Ch-Ua", fmt.Sprintf(`"Google Chrome";v="%d", "Not:A-Brand";v="8", "Chromium";v="%d"`, version, version))
-		headers.Set("Sec-Ch-Ua-Mobile", `?0`)
-		headers.Set("Sec-Ch-Ua-Platform", `"Windows"`)
-		headers.Set("Sec-Fetch-Dest", `document`)
-		headers.Set("Sec-Fetch-Mode", `navigate`)
-		headers.Set("Sec-Fetch-Site", `none`)
-		headers.Set("Sec-Fetch-User", `?1`)
-		headers.Set("Upgrade-Insecure-Requests", `1`)
-		headers.Set("User-Agent", fmt.Sprintf(`Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36`, version))
-	}
-
-	return headers
 }
 
 var proxyRegex = regexp.MustCompile(`(\d{1,3}\.\d{1,3}.\d{1,3}.\d{1,3}):(\d{1,5}):(.+?):(.+)(\r\n)`)
@@ -217,11 +178,11 @@ func getProxiesFromUrl(url string) ([]ProxyConfig, error) {
 	return res, nil
 }
 
+// ProxyClient is one SOCKS exit with one stable browser identity: TLS/HTTP2 profile and matching headers.
 type ProxyClient struct {
 	id                string
-	httpClient        http.Client
-	http2Client       http.Client
-	headers           http.Header
+	httpClient        tls_client.HttpClient
+	headers           fhttp.Header
 	limiter           *throttled.GCRARateLimiter
 	lastUnreachableAt *time.Time
 }
@@ -306,52 +267,42 @@ func runProxyManager(ctx context.Context) {
 		go func(config ProxyConfig) {
 			defer proxyConnSemaphore.Release(1)
 
-			log.Printf("Connecting to proxy %s:%d", config.host, config.port)
-			dialSocksProxy, err := proxy.SOCKS5(
-				"tcp",
-				fmt.Sprintf("%s:%d", config.host, config.port),
-				&proxy.Auth{User: config.username, Password: config.password},
-				proxy.Direct,
-			)
+			profile := randomBrowserProfile()
+			log.Printf("Connecting to proxy %s:%d as %s", config.host, config.port, profile.GetClientHelloStr())
 
+			// socks5h resolves target hostnames on the proxy, matching the previous x/net/proxy dialer.
+			proxyUrl := url.URL{
+				Scheme: "socks5h",
+				User:   url.UserPassword(config.username, config.password),
+				Host:   net.JoinHostPort(config.host, strconv.FormatInt(config.port, 10)),
+			}
+			idleConnTimeout := 60 * time.Second
+
+			options := []tls_client.HttpClientOption{
+				tls_client.WithClientProfile(profile),
+				tls_client.WithProxyUrl(proxyUrl.String()),
+				tls_client.WithTimeoutSeconds(10),
+				tls_client.WithTransportOptions(&tls_client.TransportOptions{
+					MaxIdleConns:    1024,
+					MaxConnsPerHost: 12,
+					IdleConnTimeout: &idleConnTimeout,
+				}),
+			}
+			if shufflesTlsExtensions(profile) {
+				options = append(options, tls_client.WithRandomTLSExtensionOrder())
+			}
+
+			httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 			if err != nil {
 				log.Printf("Error connecting to proxy: %v", err)
 				return
 			}
-			http2Transport := &http.Transport{
-				Dial:            dialSocksProxy.Dial,
-				MaxIdleConns:    1024,
-				MaxConnsPerHost: 12,
-				IdleConnTimeout: 60 * time.Second,
-			}
-
-			err = http2.ConfigureTransport(http2Transport)
-			if err != nil {
-				log.Printf("error upgrading proxy to http2: %v", err)
-				return
-			}
-
-			http2Client := http.Client{
-				Transport: http2Transport,
-				Timeout:   time.Second * 10,
-			}
-
-			httpClient := http.Client{
-				Transport: &http.Transport{
-					Dial:            dialSocksProxy.Dial,
-					MaxIdleConns:    1024,
-					MaxConnsPerHost: 6,
-					IdleConnTimeout: 60 * time.Second,
-				},
-				Timeout: time.Second * 10,
-			}
 
 			myClient := ProxyClient{
-				id:          config.host,
-				httpClient:  httpClient,
-				http2Client: http2Client,
-				headers:     getFakeHeaders(),
-				limiter:     createLimiter(),
+				id:         config.host,
+				httpClient: httpClient,
+				headers:    getFakeHeaders(profile),
+				limiter:    createLimiter(),
 			}
 
 			ip, err := getExternalProxyIp(&myClient, ctx)
