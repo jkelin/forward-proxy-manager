@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
@@ -19,6 +19,7 @@ LABEL org.opencontainers.image.source="https://github.com/jkelin/forward-proxy-m
 
 EXPOSE 8080
 EXPOSE 8081
+EXPOSE 8082
 CMD ["./app"]
 
 COPY --from=builder /build /app

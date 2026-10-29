@@ -86,33 +86,34 @@ Some sites (e.g. eBay search) reject requests without a session cookie. Each pro
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `X-Fpm-Warmup`  | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
 
-A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC has no warm-up field yet.
+A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC uses the `warmup_url` field instead of the header (see [gRPC Proxy](#grpc-proxy)).
 
 ## Options
 
-Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [main.go](main.go).
+Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [src/main.go](src/main.go). [.env.example](.env.example) lists all variables with defaults.
 
-| Environment                 | Default      | Description                                                                                       |
-| --------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
-| `PROXY_LIST_URL`            | **REQUIRED** | URL from which to download the proxy list. Refer to proxy list format below                       |
-| `REQUEST_TIMEOUT`           | `20s`        | Timeout for individual requests to target host                                                    |
-| `RETRIES`                   | `1`          | Number of times to retry failed requests to target                                                |
-| `RETRY_TIMEOUT`             | `5s`         | Timeout subsequent requests to target                                                             |
-| `INITIAL_IP_INFO_TIMEOUT`   | `10s`        | Timeout for proxy IP info request used to check proxy availability                                |
-| `HOST_INFO_REQUEST_TIMEOUT` | `5s`         | Timeout for host info request which we need to get information about HTTP/HTTPS/IPV6 availability |
-| `THROTTLE_REQUESTS_PER_MIN` | `30`         | Target host max requests per minute                                                               |
-| `THROTTLE_REQUESTS_BURST`   | `5`          | Max concurrent target requests for a single proxy                                                 |
-| `UNREACHABLE_CLIENT_RETRY`  | `60s`        | Retry for failing proxies                                                                         |
-| `ENABLE_WEB`                | `false`      | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                         |
-| `PROXY_PORT`                | `8080`       | HTTP(S) proxy listen port                                                                         |
-| `WEB_PORT`                  | `8081`       | Web UI listen port                                                                                |
-| `GRPC_PORT`                 | `8082`       | gRPC listen port                                                                                  |
+| Environment                 | Default                  | Description                                                                                       |
+| --------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------- |
+| `PROXY_LIST_URL`            | **REQUIRED**             | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below      |
+| `IP_CHECK_URL`              | `https://ifconfig.io/ip` | Absolute http(s) URL returning the exit IP; used to check proxy availability                      |
+| `REQUEST_TIMEOUT`           | `20s`                    | Timeout for individual requests to target host                                                    |
+| `RETRIES`                   | `1`                      | Number of times to retry failed requests to target (`>= 0`)                                       |
+| `RETRY_TIMEOUT`             | `5s`                     | How long one proxy avoids a host after the host answered 429                                      |
+| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                    | Timeout for proxy IP info request used to check proxy availability                                |
+| `HOST_INFO_REQUEST_TIMEOUT` | `5s`                     | Timeout for host info request which we need to get information about HTTP/HTTPS/IPV6 availability |
+| `THROTTLE_REQUESTS_PER_MIN` | `30`                     | Target host max requests per minute                                                               |
+| `THROTTLE_REQUESTS_BURST`   | `5`                      | Max concurrent target requests for a single proxy                                                 |
+| `UNREACHABLE_CLIENT_RETRY`  | `60s`                    | Retry for failing proxies                                                                         |
+| `ENABLE_WEB`                | `false`                  | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                         |
+| `PROXY_PORT`                | `8080`                   | HTTP(S) proxy listen port                                                                         |
+| `WEB_PORT`                  | `8081`                   | Web UI listen port                                                                                |
+| `GRPC_PORT`                 | `8082`                   | gRPC listen port                                                                                  |
 
 ## Proxy list format
 
-`HOST:PORT:USERNAME:PASSWORD`, newline separed.
+`HOST:PORT:USERNAME:PASSWORD`, one per line (LF or CRLF). Malformed lines are skipped.
 
-Proxy list get downloaded from `PROXY_LIST_URL` on Proxy Manager's startup. Proxies must be SOCKS5, not HTTP. This format is what you get from [Webshare](https://www.webshare.io/?referral_code=x71lsv7e6k56) and similar services.
+Proxy list gets downloaded from `PROXY_LIST_URL` on Proxy Manager's startup; a non-2xx response stops startup. Proxies must be SOCKS5, not HTTP. This format is what you get from [Webshare](https://www.webshare.io/?referral_code=x71lsv7e6k56) and similar services.
 
 Example:
 
@@ -125,4 +126,79 @@ Example:
 
 Forward Proxy Manager also provides a gRPC proxy for more advanced use cases. It is available on `:8082`. Schema definition can be found in [service.proto](service.proto).
 
-Currently no client libraries are available.
+`Proxy.SendRequest` semantics:
+
+- `url` must be an absolute http(s) URL, else `ProxyResponseError` `INVALID_URL`.
+- `warmup_url` has the same semantics as the HTTP `x-warmup-url` header. An invalid value returns `INVALID_URL`. The success header `x-fpm-warmup` is `fresh`, `reused` or `failed`; it is present only when `warmup_url` is set. On `failed` the response is the warm-up response.
+- `retry_on_codes` outside 100-599 returns gRPC status `INVALID_ARGUMENT`.
+- A target host that is offline returns `REMOTE_HOST_UNREACHABLE` (HTTP proxy: 502 `Remote host unreachable`).
+- Success header names are lower-case (`content-type`, `x-fpm-warmup`).
+- Client cancellation or deadline removes the request from the queue or aborts it; the RPC ends with gRPC status `CANCELLED` or `DEADLINE_EXCEEDED`.
+
+### Node / Bun client
+
+The [`forward-proxy-manager`](packages/client) npm package wraps the gRPC API (ESM only, Node 22+ or Bun).
+
+```typescript
+import { ForwardProxyError, ForwardProxyManager, ProxyErrorType } from "forward-proxy-manager";
+import { z } from "zod";
+
+const manager = new ForwardProxyManager("localhost:8082", { semaphore: 100, maxRetries: 2 });
+
+const response = await manager.proxyFetch("https://www.ebay.com/sch/i.html?_nkw=gpu", {
+  priority: 1,
+  retryOnCodes: [403, 503],
+  warmupUrl: "https://www.ebay.com/n/all-categories",
+  signal: AbortSignal.timeout(30_000),
+});
+
+console.log(response.warmup); // "fresh" | "reused" | "failed" | undefined
+console.log(await response.text());
+
+const raw = await manager.proxyRequest("https://httpbin.org/json");
+const data = await (
+  await manager.proxyFetch("https://httpbin.org/json")
+).json(z.object({ slideshow: z.object({}) }));
+
+console.log(raw.code, raw.headers["content-type"], data.slideshow);
+
+manager.close();
+```
+
+- `proxyRequest` resolves `{ body, code, headers, warmup }` for any target status. `proxyFetch` rejects when the status is not 200.
+- Invalid input rejects with a `ZodError` before anything is sent.
+- Server errors reject with `ForwardProxyError` (`errorType` is a `ProxyErrorType`, `body` the error body).
+- `semaphore` limits requests in flight. `maxRetries` retries gRPC `UNAVAILABLE` and connection failures (`ForwardProxyConnectionError`) with backoff.
+- Aborting `signal` cancels the RPC, or drops the request from the client queue, and rejects with an `AbortError`.
+
+Breaking changes in 0.2.0:
+
+- ESM only; generated code switched from `protoc-gen-ts` / `google-protobuf` to `ts-proto` with `@grpc/grpc-js`.
+- `connect()` resolves the ts-proto `ProxyClient` (method `sendRequest`, camelCase fields).
+- `json()` takes a Zod schema and returns the parsed value.
+- Server errors are `ForwardProxyError` (message unchanged: `request failed: <TYPE>`); aborts reject with an `AbortError` instead of `Error("Request aborted")`.
+- Non-retryable gRPC errors now reject instead of looping forever; the semaphore permit is released during retry backoff.
+- New: `warmupUrl` option, `headers` and `warmup` in results, `close()`.
+
+## Development
+
+Tools are pinned in [mise.toml](mise.toml) (Go 1.27, Bun, protoc, protoc-gen-go, protoc-gen-go-grpc, just). The repository is a Bun workspace; the client lives in `packages/client`.
+
+```bash
+mise install
+just install           # bun install + git hooks
+cp .env.example .env   # set PROXY_LIST_URL
+just dev               # run the Go proxy with .env
+```
+
+| Recipe              | Action                                                          |
+| ------------------- | --------------------------------------------------------------- |
+| `just codegen`      | Regenerate Go (`src/com.scrape-proxy`) and TypeScript gRPC code |
+| `just build`        | Build the Go binary (`dist/`) and the client package            |
+| `just test`         | `go test -race` and `bun test`                                  |
+| `just lint`         | oxlint (strict + anti-slop rules) and `go vet`                  |
+| `just format`       | oxfmt and gofmt                                                 |
+| `just docker-build` | Build `ghcr.io/jkelin/forward-proxy-manager:latest`             |
+| `just publish`      | Push the Docker image and publish the client to npm             |
+
+The pre-commit hook runs oxfmt on staged TS/JSON/Markdown files and gofmt on staged Go files.

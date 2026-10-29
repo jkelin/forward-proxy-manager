@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -20,20 +22,37 @@ const warmupUrlHeader = "x-warmup-url"
 // warmupStatusHeader tells the client what happened to the session: fresh, reused or failed.
 const warmupStatusHeader = "X-Fpm-Warmup"
 
-// parseWarmupUrl validates the x-warmup-url header value.
-// Edge cases: an empty value means no warm-up (nil, nil); relative, non-http(s) and host-less URLs fail.
+// parseWarmupUrl validates the x-warmup-url header value (and the gRPC warmup_url field).
+// Edge cases: an empty value means no warm-up (nil, nil); everything parseAbsoluteHttpUrl rejects fails.
 func parseWarmupUrl(raw string) (*url.URL, error) {
 	if raw == "" {
 		return nil, nil
 	}
 
+	parsed, err := parseAbsoluteHttpUrl(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", warmupUrlHeader, err)
+	}
+
+	return parsed, nil
+}
+
+// parseAbsoluteHttpUrl accepts only absolute http(s) URLs with a host.
+// Edge cases: relative, non-http(s), host-less (e.g. "https://:443/") URLs and ports outside 1-65535 fail.
+func parseAbsoluteHttpUrl(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
 	}
 
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return nil, fmt.Errorf("%s must be an absolute http(s) URL", warmupUrlHeader)
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return nil, fmt.Errorf("%q must be an absolute http(s) URL", raw)
+	}
+
+	if port := parsed.Port(); port != "" {
+		if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
+			return nil, fmt.Errorf("%q has an invalid port %q", raw, port)
+		}
 	}
 
 	return parsed, nil
@@ -46,8 +65,10 @@ func isSessionRejected(code int, hasWarmup bool) bool {
 }
 
 // registrableDomain returns the eTLD+1 used for same-site checks.
-// Edge cases: IP literals and hosts without a registrable domain (e.g. "localhost", "co.uk") compare as the bare host.
+// Edge cases: DNS names compare case-insensitively; IP literals and hosts without a registrable domain
+// (e.g. "localhost", "co.uk") compare as the bare host.
 func registrableDomain(host string) string {
+	host = strings.ToLower(host)
 	if net.ParseIP(host) != nil {
 		return host
 	}
@@ -60,8 +81,9 @@ func registrableDomain(host string) string {
 	return domain
 }
 
+// isSameOrigin compares scheme, host and effective port; DNS host names are case-insensitive.
 func isSameOrigin(first *url.URL, second *url.URL) bool {
-	return first.Scheme == second.Scheme && withoutDefaultPort(first) == withoutDefaultPort(second)
+	return first.Scheme == second.Scheme && strings.EqualFold(withoutDefaultPort(first), withoutDefaultPort(second))
 }
 
 // fetchSite computes Sec-Fetch-Site for a navigation from initiator to target (schemeful same-site, as in Chrome/Firefox).
@@ -78,7 +100,7 @@ func fetchSite(initiator *url.URL, target *url.URL) string {
 }
 
 // refererFor applies the browsers' default strict-origin-when-cross-origin policy.
-// Edge cases: same-origin sends the full URL without fragment; cross-origin sends only the origin;
+// Edge cases: same-origin sends the full URL without fragment or credentials; cross-origin sends only the origin;
 // an https -> http downgrade sends nothing ("").
 func refererFor(initiator *url.URL, target *url.URL) string {
 	if initiator.Scheme == "https" && target.Scheme == "http" {
@@ -86,11 +108,12 @@ func refererFor(initiator *url.URL, target *url.URL) string {
 	}
 
 	if isSameOrigin(initiator, target) {
-		withoutFragment := *initiator
-		withoutFragment.Fragment = ""
-		withoutFragment.RawFragment = ""
+		stripped := *initiator
+		stripped.User = nil
+		stripped.Fragment = ""
+		stripped.RawFragment = ""
 
-		return withoutFragment.String()
+		return stripped.String()
 	}
 
 	return initiator.Scheme + "://" + withoutDefaultPort(initiator) + "/"
@@ -98,12 +121,15 @@ func refererFor(initiator *url.URL, target *url.URL) string {
 
 // navigationHeaders turns identity headers (a typed-URL navigation) into a link click from initiator to target.
 // The identity's header order already lists "referer", so only the values change.
+// Edge cases: a referer already present in identityHeaders is removed when the policy sends none.
 func navigationHeaders(identityHeaders http.Header, initiator *url.URL, target *url.URL) http.Header {
 	headers := identityHeaders.Clone()
 	headers["sec-fetch-site"] = []string{fetchSite(initiator, target)}
 
 	if referer := refererFor(initiator, target); referer != "" {
 		headers["referer"] = []string{referer}
+	} else {
+		delete(headers, "referer")
 	}
 
 	return headers

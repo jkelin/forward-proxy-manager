@@ -1,0 +1,7 @@
+[tools]
+go = "1.27.3"
+bun = "1.4"
+protoc = "36.2"
+just = "1.59"
+"go:google.golang.org/protobuf/cmd/protoc-gen-go" = "1.36.12"
+"go:google.golang.org/grpc/cmd/protoc-gen-go-grpc" = "1.6.2"

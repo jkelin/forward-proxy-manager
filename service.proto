@@ -13,6 +13,9 @@ message ProxyRequest {
   map<string, string> headers = 3;
   optional int64 priority = 4;
   repeated uint32 retry_on_codes = 5;
+  // Absolute http(s) URL fetched first on the chosen exit when it has no warm
+  // session for the target host. Same semantics as the HTTP `x-warmup-url` header.
+  optional string warmup_url = 6;
 }
 
 message ProxyResponseSuccess {

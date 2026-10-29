@@ -3,15 +3,19 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dustin/go-broadcast"
 	"github.com/google/btree"
+	"github.com/throttled/throttled/v2"
 )
 
 type ResponseStatus int64
@@ -28,7 +32,7 @@ const (
 type RequestStatus int64
 
 const (
-	RequestStatusPending ResponseStatus = iota
+	RequestStatusPending RequestStatus = iota
 	RequestStatusActive
 	RequestStatusFinished
 )
@@ -56,204 +60,332 @@ type ActiveRequest struct {
 	WarmupUrl *url.URL
 }
 
-var requestCounter uint64 = 0
-var newRequestsBroacast = broadcast.NewBroadcaster(1)
-var requestFinishedBroacast = broadcast.NewBroadcaster(1)
+// errHostOffline means the target host failed the direct reachability check, so no proxy is tried.
+var errHostOffline = errors.New("host is not reachable")
 
-func initializeRequest(
+// proxyExit is the scheduler's view of one proxy exit; *ProxyClient implements it.
+type proxyExit interface {
+	// RateLimit reports whether host is limited on this exit; when it is not, one request token is consumed.
+	RateLimit(host HostInfo) (bool, throttled.RateLimitResult, error)
+	// backOff keeps this exit away from host after the host answered 429.
+	backOff(host HostInfo)
+	// markUnreachable keeps this exit out of scheduling after the proxy itself failed.
+	markUnreachable()
+	makeRequestWithClient(req *ActiveRequest, timeout time.Duration) (*Response, error)
+}
+
+// RequestScheduler queues requests by priority and runs each on a free proxy exit, retrying failed attempts.
+// Every new or re-queued request is published on requests; every final one on finished.
+type RequestScheduler struct {
+	retries        int
+	requestTimeout time.Duration
+	lookupHost     func(host string) *HostInfo
+	shuffle        func(length int) []int
+	// idleInterval is the longest pause between dispatch passes when no event arrives.
+	idleInterval time.Duration
+	nextId       atomic.Uint64
+	requests     broadcast.Broadcaster
+	finished     broadcast.Broadcaster
+	proxyLists   broadcast.Broadcaster
+}
+
+func newRequestScheduler(retries int, requestTimeout time.Duration, lookupHost func(host string) *HostInfo) *RequestScheduler {
+	return &RequestScheduler{
+		retries:        retries,
+		requestTimeout: requestTimeout,
+		lookupHost:     lookupHost,
+		shuffle:        rand.Perm,
+		idleInterval:   time.Second,
+		requests:       broadcast.NewBroadcaster(1),
+		finished:       broadcast.NewBroadcaster(1),
+		proxyLists:     broadcast.NewBroadcaster(1),
+	}
+}
+
+// setProxies replaces the exits the scheduler dispatches to.
+func (scheduler *RequestScheduler) setProxies(proxies []proxyExit) {
+	scheduler.proxyLists.Submit(proxies)
+}
+
+// submit queues a GET for uri; its final response arrives once on the returned channel.
+// Edge cases: a host failing the reachability check returns errHostOffline without queueing.
+func (scheduler *RequestScheduler) submit(
+	ctx context.Context,
 	uri *url.URL,
 	priority int64,
 	retryOnCodes []uint16,
 	warmupUrl *url.URL,
-	ctx context.Context,
 ) (*ActiveRequest, <-chan *Response, error) {
-	hostInfo := getHostInfo(uri.Hostname())
+	hostInfo := scheduler.lookupHost(uri.Hostname())
 	if !hostInfo.isOnline() {
-		return nil, nil, errors.New("host is not reachable")
+		return nil, nil, errHostOffline
 	}
 
-	requestCounter = requestCounter + 1
 	callback := make(chan *Response, 1)
 
-	req := &ActiveRequest{
-		Id:           requestCounter - 1,
+	request := &ActiveRequest{
+		Id:           scheduler.nextId.Add(1) - 1,
 		Url:          uri,
 		Method:       "GET",
 		Priority:     priority,
 		Host:         *hostInfo,
-		Status:       RequestStatus(RequestStatusPending),
-		Retries:      0,
+		Status:       RequestStatusPending,
 		Callback:     callback,
 		Context:      ctx,
 		RetryOnCodes: retryOnCodes,
 		WarmupUrl:    warmupUrl,
 	}
 
-	newRequestsBroacast.Submit(req)
+	scheduler.requests.Submit(request)
 
-	return req, callback, nil
+	return request, callback, nil
 }
 
-func (request *ActiveRequest) executeAt(proxy *ProxyClient) {
+// execute submits a request and waits for its final response.
+// Edge cases: ctx cancellation returns a RequestCancelled response at once; the queued request is dropped on the
+// next dispatch pass and an attempt in flight is aborted through the same ctx.
+func (scheduler *RequestScheduler) execute(
+	ctx context.Context,
+	uri *url.URL,
+	priority int64,
+	retryOnCodes []uint16,
+	warmupUrl *url.URL,
+) (*Response, error) {
+	_, callback, err := scheduler.submit(ctx, uri, priority, retryOnCodes, warmupUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case response := <-callback:
+		return response, nil
+	case <-ctx.Done():
+		return &Response{Status: ResponseStatusRequestCancelled}, nil
+	}
+}
+
+type attemptDecision int
+
+const (
+	// decisionFinish hands the response to the caller.
+	decisionFinish attemptDecision = iota
+	// decisionRetry re-queues the request while retries remain, else finishes with the response.
+	decisionRetry
+	// decisionRequeue re-queues without using a retry: the exit failed, not the request.
+	decisionRequeue
+)
+
+// classifyAttempt decides what follows one attempt and which response the caller gets if it ends here.
+// Edge cases: a dropped connection (EOF) retries; a cancelled caller finishes as RequestCancelled; other errors
+// finish as UnknownError; a missing status code is treated like 502.
+func classifyAttempt(request *ActiveRequest, response *Response, err error) (attemptDecision, *Response) {
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return decisionFinish, &Response{Status: ResponseStatusRequestCancelled}
+		}
+
+		failure := &Response{Status: ResponseStatusUnknownError}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return decisionRetry, failure
+		}
+
+		log.Printf("UNKNOWN ERROR %s: %v", request.Url, err)
+
+		return decisionFinish, failure
+	}
+
+	switch response.Status {
+	case ResponseStatusProxyUnreachable:
+		return decisionRequeue, response
+	case ResponseStatusTimeout, ResponseStatusHostUnreachable:
+		return decisionRetry, response
+	case ResponseStatusOk:
+	default:
+		return decisionFinish, response
+	}
+
+	retryable := response.Code == 0 ||
+		response.Code == http.StatusBadGateway ||
+		response.Code == http.StatusTooManyRequests ||
+		isSessionRejected(response.Code, request.WarmupUrl != nil) ||
+		slices.Contains(request.RetryOnCodes, uint16(response.Code))
+	if retryable {
+		return decisionRetry, response
+	}
+
+	return decisionFinish, response
+}
+
+// attempt runs request once on proxy, then re-queues it or delivers the final response.
+// makeRequestWithClient already reset the exit's session after a rejection, so the retry starts fresh.
+func (scheduler *RequestScheduler) attempt(request *ActiveRequest, proxy proxyExit) {
 	request.Lock.Lock()
-	request.Status = RequestStatus(RequestStatusActive)
+	request.Status = RequestStatusActive
 	request.Lock.Unlock()
 
-	resp, err := proxy.makeRequestWithClient(request, globalConfiguration.RequestTimeout)
+	response, err := proxy.makeRequestWithClient(request, scheduler.requestTimeout)
+	decision, final := classifyAttempt(request, response, err)
 
-	request.Lock.Lock()
-	defer request.Lock.Unlock()
-	defer func() {
-		if request.Status == RequestStatus(RequestStatusPending) {
-			newRequestsBroacast.Submit(request)
-		} else {
-			requestFinishedBroacast.Submit(request)
-		}
-	}()
-
-	retry := false
-
-	if err != nil {
-		if urlErr, ok := err.(*url.Error); ok && urlErr.Err.Error() == "EOF" {
-			retry = true
-		} else if err.Error() == "context canceled" {
-			request.Callback <- &Response{
-				Status: ResponseStatusRequestCancelled,
-			}
-
-			return
-		} else {
-			log.Printf("UNKNOWN ERROR %s: %v", request.Url, err)
-			request.Callback <- &Response{
-				Status: ResponseStatusUnknownError,
-			}
-
-			return
-		}
-	} else {
-		if resp.Status == ResponseStatusTimeout || resp.Status == ResponseStatusHostUnreachable || (resp.Status == ResponseStatusOk && resp.Code == 502) || (resp.Status == ResponseStatusOk && resp.Code == 0) {
-			retry = true
-		} else if resp.Status == ResponseStatusProxyUnreachable {
+	if response != nil {
+		if response.Status == ResponseStatusProxyUnreachable {
 			proxy.markUnreachable()
-
-			request.Status = RequestStatus(RequestStatusPending)
-
-			return
-		} else if resp.Code == 429 {
-			_, _, err = proxy.limiter.RateLimit(request.Host.host, 100)
-			if err != nil {
-				log.Printf("UNKNOWN ERROR in rateLimiter %s: %v", request.Url, err)
-
-				request.Callback <- &Response{
-					Status: ResponseStatusUnknownError,
-				}
-
-				return
-			}
-
-			retry = true
-		} else if isSessionRejected(resp.Code, request.WarmupUrl != nil) {
-			// makeRequestWithClient already reset this proxy's session; another proxy (or a fresh warm-up) gets the retry.
-			retry = true
-		}
-
-		for _, code := range request.RetryOnCodes {
-			if resp.Code == int(code) {
-				retry = true
-				break
-			}
+		} else if response.Status == ResponseStatusOk && response.Code == http.StatusTooManyRequests {
+			proxy.backOff(request.Host)
 		}
 	}
 
-	if retry && int(request.Retries) < globalConfiguration.Retries {
-		request.Retries = request.Retries + 1
-		request.Status = RequestStatus(RequestStatusPending)
+	request.Lock.Lock()
+	requeue := decision == decisionRequeue || (decision == decisionRetry && int(request.Retries) < scheduler.retries)
+	if requeue {
+		if decision == decisionRetry {
+			request.Retries++
+		}
+
+		request.Status = RequestStatusPending
+		request.Lock.Unlock()
+		scheduler.requests.Submit(request)
 
 		return
 	}
 
-	request.Callback <- resp
+	request.Status = RequestStatusFinished
+	request.Lock.Unlock()
+
+	request.Callback <- final
+	scheduler.finished.Submit(request)
 }
 
-// shuffleIndices returns a slice of indices in random order
-func shuffleIndices(length int) []int {
-	indices := make([]int, length)
-	for i := range indices {
-		indices[i] = i
+// drop finishes a queued request whose caller is gone.
+func (scheduler *RequestScheduler) drop(request *ActiveRequest) {
+	request.Lock.Lock()
+	request.Status = RequestStatusFinished
+	request.Lock.Unlock()
+
+	request.Callback <- &Response{Status: ResponseStatusRequestCancelled}
+	scheduler.finished.Submit(request)
+}
+
+// requestOrder sorts higher priority first, then older (lower Id) first.
+func requestOrder(first *ActiveRequest, second *ActiveRequest) bool {
+	if first.Priority != second.Priority {
+		return first.Priority > second.Priority
 	}
-	rand.Shuffle(length, func(i, j int) {
-		indices[i], indices[j] = indices[j], indices[i]
-	})
-	return indices
+
+	return first.Id < second.Id
 }
 
-func runRequestScheduler(ctx context.Context) {
-	pq := btree.NewG[*ActiveRequest](32, func(a, b *ActiveRequest) bool {
-		if a.Priority != b.Priority {
-			return a.Priority > b.Priority
+// dispatch starts every queued request that has a free exit, highest priority first, and returns the pause
+// before the next pass.
+// Edge cases: requests with a done ctx are dropped; exits are tried in shuffled order; the pause is the shortest
+// positive rate-limit hint, capped at idleInterval.
+func (scheduler *RequestScheduler) dispatch(queue *btree.BTreeG[*ActiveRequest], proxies []proxyExit) time.Duration {
+	type assignment struct {
+		request *ActiveRequest
+		proxy   proxyExit
+	}
+
+	wait := scheduler.idleInterval
+	cancelled := make([]*ActiveRequest, 0)
+	assignments := make([]assignment, 0)
+
+	queue.Ascend(func(request *ActiveRequest) bool {
+		if request.Context.Err() != nil {
+			cancelled = append(cancelled, request)
+			return true
 		}
 
-		return a.Id < b.Id
+		for _, index := range scheduler.shuffle(len(proxies)) {
+			proxy := proxies[index]
+
+			limited, result, err := proxy.RateLimit(request.Host)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			if limited {
+				if result.RetryAfter > 0 && result.RetryAfter < wait {
+					wait = result.RetryAfter
+				}
+
+				continue
+			}
+
+			assignments = append(assignments, assignment{request: request, proxy: proxy})
+
+			return true
+		}
+
+		return true
 	})
 
-	proxyListChanged := make(chan interface{})
-	proxyListChangedBroadcaster.Register(proxyListChanged)
-	defer proxyListChangedBroadcaster.Unregister(proxyListChanged)
+	for _, request := range cancelled {
+		queue.Delete(request)
+		scheduler.drop(request)
+	}
 
-	newRequests := make(chan interface{})
-	newRequestsBroacast.Register(newRequests)
-	defer newRequestsBroacast.Unregister(newRequests)
+	for _, started := range assignments {
+		queue.Delete(started.request)
+		go scheduler.attempt(started.request, started.proxy)
+	}
 
-	proxies := make([]*ProxyClient, 0)
-	retryRequestAfter := time.Duration(0)
+	return wait
+}
+
+// start registers the scheduler's listeners, then owns the queue in a goroutine until ctx is done, dispatching
+// after every event and at least every idleInterval. The returned channel closes once the loop has stopped.
+// Edge cases: listeners are registered before start returns, so no request or proxy list submitted afterwards is
+// lost; on shutdown the listeners are drained while unregistering, so a broadcaster mid-delivery cannot block it.
+func (scheduler *RequestScheduler) start(ctx context.Context) <-chan struct{} {
+	proxyLists := make(chan interface{})
+	scheduler.proxyLists.Register(proxyLists)
+
+	requests := make(chan interface{})
+	scheduler.requests.Register(requests)
+
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		scheduler.loop(ctx, requests, proxyLists)
+
+		unregistered := make(chan struct{})
+		go func() {
+			scheduler.requests.Unregister(requests)
+			scheduler.proxyLists.Unregister(proxyLists)
+			close(unregistered)
+		}()
+
+		for {
+			select {
+			case <-requests:
+			case <-proxyLists:
+			case <-unregistered:
+				return
+			}
+		}
+	}()
+
+	return stopped
+}
+
+func (scheduler *RequestScheduler) loop(ctx context.Context, requests <-chan interface{}, proxyLists <-chan interface{}) {
+	queue := btree.NewG(32, requestOrder)
+	proxies := make([]proxyExit, 0)
+	timer := time.NewTimer(scheduler.idleInterval)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case req := <-newRequests:
-			pq.ReplaceOrInsert(req.(*ActiveRequest))
-			retryRequestAfter = 0
-		case newProxies := <-proxyListChanged:
-			proxies = newProxies.([]*ProxyClient)
-			retryRequestAfter = 0
-		case <-time.After(retryRequestAfter):
+		case request := <-requests:
+			queue.ReplaceOrInsert(request.(*ActiveRequest))
+		case list := <-proxyLists:
+			proxies = list.([]proxyExit)
+		case <-timer.C:
 		}
 
-		retryRequestAfter = 1000 * time.Millisecond
-
-		if pq.Len() == 0 {
-			continue
-		}
-
-		pq.Ascend(func(item *ActiveRequest) bool {
-			if item.Context.Err() != nil {
-				pq.Delete(item)
-				return true
-			}
-
-			for _, idx := range shuffleIndices(len(proxies)) {
-				proxy := proxies[idx]
-				limited, result, err := proxy.RateLimit(item.Host)
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				if limited {
-					if result.RetryAfter < retryRequestAfter {
-						retryRequestAfter = result.RetryAfter
-					}
-
-					continue
-				}
-
-				pq.Delete(item)
-				go item.executeAt(proxy)
-				retryRequestAfter = 0
-				return false
-			}
-
-			return true
-		})
+		timer.Reset(scheduler.dispatch(queue, proxies))
 	}
 }

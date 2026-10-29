@@ -1,0 +1,31 @@
+{
+  "name": "forward-proxy-manager-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "lint": "bun run --parallel lint:ts lint:go",
+    "lint:ts": "bun run --parallel --filter './packages/*' lint",
+    "lint:go": "go vet -C src ./...",
+    "format": "bun run --parallel format:ts format:go",
+    "format:ts": "oxfmt .",
+    "format:go": "gofmt -w src",
+    "test": "bun run --parallel test:ts test:go",
+    "test:ts": "bun run --parallel --filter './packages/*' test",
+    "test:go": "go test -C src -race ./...",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "^1.90.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "oxfmt": "^0.75.0",
+    "oxlint": "^1.90.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs,cjs,json,jsonc,md,yml,yaml,toml,css,html}": "oxfmt --no-error-on-unmatched-pattern",
+    "*.go": "gofmt -w"
+  }
+}

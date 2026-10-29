@@ -17,3 +17,8 @@
 
 .env
 .idea
+# Bun
+node_modules/
+dist/
+*.tgz
+*.tsbuildinfo

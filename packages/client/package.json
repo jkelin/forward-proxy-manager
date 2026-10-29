@@ -1,0 +1,45 @@
+{
+  "name": "forward-proxy-manager",
+  "version": "0.2.0",
+  "description": "gRPC client for Forward Proxy Manager",
+  "homepage": "https://github.com/jkelin/forward-proxy-manager",
+  "license": "MIT",
+  "author": {
+    "name": "Jan Kelin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jkelin/forward-proxy-manager"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "codegen": "protoc --ts_proto_out=src/generated --ts_proto_opt=outputServices=grpc-js,env=node,esModuleInterop=true,importSuffix=.js,oneof=unions-value -I ../.. ../../service.proto",
+    "lint": "oxlint -c ../../oxlint.config.ts .",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.16.0",
+    "@grpc/grpc-js": "^1.14.7",
+    "es-toolkit": "^1.53.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "ts-proto": "^2.18.3",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,5 @@
+bun.lock
+packages/*/src/generated/
+packages/*/dist/
+tools/oxlint/anti-slop/
+src/

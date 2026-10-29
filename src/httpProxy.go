@@ -3,34 +3,28 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"github.com/go-httpproxy/httpproxy"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/go-httpproxy/httpproxy"
 )
+
+// statusClientClosedRequest is nginx's 499; the client never sees it because it already went away.
+const statusClientClosedRequest = 499
 
 func OnError(ctx *httpproxy.Context, where string, err *httpproxy.Error, opErr error) {
 	if strings.Contains(opErr.Error(), "request canceled") {
 		return
 	}
 
-	if strings.Contains(opErr.Error(), "request canceled") {
-		return
-	}
-
 	log.Printf("ERR: %s: %s [%s]", where, err, opErr)
 }
-
-//func OnAuth(ctx *httpproxy.Context, authType string, user string, pass string) bool {
-//	// Auth test user.
-//	if user == "test" && pass == "1234" {
-//		return true
-//	}
-//	return false
-//}
 
 func OnConnect(ctx *httpproxy.Context, host string) (
 	ConnectAction httpproxy.ConnectAction, newHost string) {
@@ -54,59 +48,66 @@ func createStringResp(body string, code int) *http.Response {
 	return &response
 }
 
-func OnRequest(ctx *httpproxy.Context, req *http.Request) (
-	resp *http.Response) {
-	// Log proxying requests.
-	//log.Printf("INFO: Proxy: %s %s", req.Method, req.URL.String())
+type httpProxyHandler struct {
+	scheduler *RequestScheduler
+}
 
-	priority := int64(0)
-	prioHeader, err := strconv.ParseInt(req.Header.Get("x-priority"), 10, 32)
-	if err == nil {
-		priority = prioHeader
-		req.Header.Del("x-priority")
+// parsePriority reads the x-priority header.
+// Edge cases: a missing or non-numeric value, or one outside int32, means priority 0.
+func parsePriority(raw string) int64 {
+	priority, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0
 	}
 
-	// x-* headers are FPM control headers; outbound requests use the identity's headers only, so they never leak.
+	return priority
+}
+
+// OnRequest answers every proxied request itself; returning nil would make httpproxy send it directly, bypassing
+// the proxy pool. x-* headers are FPM control headers; outbound requests use the identity's headers only, so they
+// never leak.
+func (handler *httpProxyHandler) OnRequest(ctx *httpproxy.Context, req *http.Request) (resp *http.Response) {
+	priority := parsePriority(req.Header.Get("x-priority"))
+
 	warmupUrl, err := parseWarmupUrl(req.Header.Get(warmupUrlHeader))
 	if err != nil {
-		return createStringResp(fmt.Sprintf("Invalid %s: %v", warmupUrlHeader, err), 400)
+		return createStringResp(fmt.Sprintf("Invalid %s: %v", warmupUrlHeader, err), http.StatusBadRequest)
 	}
 
-	retryOnCodes := make([]uint16, 0)
+	proxiedResp, err := handler.scheduler.execute(req.Context(), req.URL, priority, make([]uint16, 0), warmupUrl)
+	if errors.Is(err, errHostOffline) {
+		return createStringResp("Remote host unreachable", http.StatusBadGateway)
+	}
 
-	_, respChan, err := initializeRequest(req.URL, priority, retryOnCodes, warmupUrl, req.Context())
 	if err != nil {
 		log.Printf("ERROR %s: %v", req.URL.String(), err)
-		return createStringResp("Proxy error", 500)
+		return createStringResp("Proxy error", http.StatusInternalServerError)
 	}
 
-	proxiedResp := <-respChan
-	if proxiedResp.Status == ResponseStatusRequestCancelled {
-		return nil
+	switch proxiedResp.Status {
+	case ResponseStatusOk:
+	case ResponseStatusRequestCancelled:
+		return createStringResp("Request cancelled", statusClientClosedRequest)
+	case ResponseStatusTimeout:
+		return createStringResp("Remote host timed out", http.StatusBadGateway)
+	case ResponseStatusHostUnreachable:
+		return createStringResp("Remote host unreachable", http.StatusBadGateway)
+	default:
+		return createStringResp("Proxy error", http.StatusInternalServerError)
 	}
-
-	if proxiedResp.Status == ResponseStatusTimeout {
-		return createStringResp("Remote host timed out", 502)
-	}
-
-	if proxiedResp.Status == ResponseStatusHostUnreachable {
-		return createStringResp("Remote host unreachable", 502)
-	}
-
-	reader := bytes.NewReader(proxiedResp.Body)
 
 	response := http.Response{
-		Body:             io.NopCloser(reader),
+		Body:             io.NopCloser(bytes.NewReader(proxiedResp.Body)),
 		StatusCode:       proxiedResp.Code,
 		TransferEncoding: nil,
 		Uncompressed:     true,
-		ContentLength:    int64(len(proxiedResp.Body)),
+		ContentLength:    -1,
 		Close:            false,
 		Header:           http.Header{},
 	}
 
 	for key, values := range proxiedResp.Headers {
-		if strings.ToLower(key) == "transfer-encoding" || strings.ToLower(key) == "content-length" {
+		if strings.EqualFold(key, "transfer-encoding") || strings.EqualFold(key, "content-length") {
 			continue
 		}
 
@@ -115,23 +116,44 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 		}
 	}
 
-	response.ContentLength = -1
-	response.TransferEncoding = nil
-
 	return &response
 }
 
-func runHttpProxy(ctx context.Context) {
-	prx, _ := httpproxy.NewProxy()
-
-	prx.OnError = OnError
-	//prx.OnAccept = OnAccept
-	//prx.OnAuth = OnAuth
-	prx.OnConnect = OnConnect
-	prx.OnRequest = OnRequest
-
-	err := http.ListenAndServe(fmt.Sprintf(":%d", globalConfiguration.ProxyPort), prx)
+func newHttpProxy(scheduler *RequestScheduler) (*httpproxy.Proxy, error) {
+	proxy, err := httpproxy.NewProxy()
 	if err != nil {
+		return nil, err
+	}
+
+	handler := &httpProxyHandler{scheduler: scheduler}
+	proxy.OnError = OnError
+	proxy.OnConnect = OnConnect
+	proxy.OnRequest = handler.OnRequest
+
+	return proxy, nil
+}
+
+// runHttpProxy serves the forward proxy on port until ctx is done.
+func runHttpProxy(ctx context.Context, scheduler *RequestScheduler, port uint16) {
+	proxy, err := newHttpProxy(scheduler)
+	if err != nil {
+		log.Fatalf("Failed to create proxy server: %v", err)
+	}
+
+	httpServer := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: proxy}
+
+	go func() {
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Failed to stop proxy server: %v", err)
+		}
+	}()
+
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Failed to start proxy server: %v", err)
 	}
 }

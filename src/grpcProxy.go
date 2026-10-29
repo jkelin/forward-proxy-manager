@@ -1,23 +1,23 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"flag"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net"
-	url2 "net/url"
 	"strings"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	pb "scrape-proxy/com.scrape-proxy"
 )
 
 type server struct {
 	pb.UnimplementedProxyServer
+	scheduler *RequestScheduler
 }
 
 func createProxyErrorResp(errorType pb.ProxyResponseError_ErrorType) *pb.ProxyResponse {
@@ -30,97 +30,124 @@ func createProxyErrorResp(errorType pb.ProxyResponseError_ErrorType) *pb.ProxyRe
 	}
 }
 
-func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.ProxyResponse, error) {
-	//return &pb.ProxyResponse{Message: "Hello " + in.GetName()}, nil
+// parseRetryOnCodes validates retry_on_codes.
+// Edge cases: codes outside 100-599 cannot be HTTP status codes and are rejected; an empty list is valid.
+func parseRetryOnCodes(codes []uint32) ([]uint16, error) {
+	retryOnCodes := make([]uint16, 0, len(codes))
 
-	priority := int64(0)
-	if in.Priority != nil {
-		priority = in.GetPriority()
-	}
-
-	url, err := url2.Parse(in.GetUrl())
-	if err != nil || url.Scheme == "" || url.Host == "" {
-		return createProxyErrorResp(pb.ProxyResponseError_INVALID_URL), nil
-	}
-
-	retryOnCodes := make([]uint16, 0)
-	if in.RetryOnCodes != nil {
-		for _, code := range in.GetRetryOnCodes() {
-			retryOnCodes = append(retryOnCodes, uint16(code))
+	for _, code := range codes {
+		if code < 100 || code > 599 {
+			return nil, fmt.Errorf("retry_on_codes contains %d, not an HTTP status code", code)
 		}
+
+		retryOnCodes = append(retryOnCodes, uint16(code))
 	}
 
-	_, respChan, err := initializeRequest(url, priority, retryOnCodes, nil, ctx)
-	if err != nil {
-		log.Printf("ERROR %s: %v", url.String(), err)
-		return createProxyErrorResp(pb.ProxyResponseError_PROXY_ERROR), nil
-	}
+	return retryOnCodes, nil
+}
 
-	proxiedResp := <-respChan
-	if proxiedResp.Status == ResponseStatusRequestCancelled {
-		return nil, nil
-	}
+// successHeaders flattens response headers into the proto map with lowercase (HTTP/2 style) names.
+// Edge cases: hop-by-hop framing headers are dropped; for repeated headers the last value wins.
+func successHeaders(headers map[string][]string) map[string]string {
+	flattened := make(map[string]string, len(headers))
 
-	if proxiedResp.Status == ResponseStatusTimeout {
-		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_TIMED_OUT), nil
-	}
-
-	if proxiedResp.Status == ResponseStatusHostUnreachable {
-		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE), nil
-	}
-
-	reader := bytes.NewReader(proxiedResp.Body)
-
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		log.Printf("ERROR %s: %v", url.String(), err)
-		return createProxyErrorResp(pb.ProxyResponseError_PROXY_ERROR), nil
-	}
-
-	headers := make(map[string]string)
-
-	for key, values := range proxiedResp.Headers {
-		if strings.ToLower(key) == "transfer-encoding" || strings.ToLower(key) == "content-length" {
+	for key, values := range headers {
+		name := strings.ToLower(key)
+		if name == "transfer-encoding" || name == "content-length" || len(values) == 0 {
 			continue
 		}
 
-		for _, value := range values {
-			headers[key] = value
-		}
+		flattened[name] = values[len(values)-1]
 	}
 
-	response := &pb.ProxyResponse{
-		Response: &pb.ProxyResponse_Success{
-			Success: &pb.ProxyResponseSuccess{
-				Body:    body,
-				Status:  int32(proxiedResp.Code),
-				Headers: headers,
-			},
-		},
-	}
-
-	return response, nil
+	return flattened
 }
 
-func runGrpcProxy(ctx context.Context) {
-	flag.Parse()
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", globalConfiguration.GrpcPort))
+// SendRequest proxies one GET through the pool.
+// Edge cases: an invalid url or warmup_url returns INVALID_URL; invalid retry_on_codes return InvalidArgument;
+// a target failing the reachability check returns REMOTE_HOST_UNREACHABLE; client cancellation or deadline returns
+// the matching gRPC status instead of a response.
+func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.ProxyResponse, error) {
+	target, err := parseAbsoluteHttpUrl(in.GetUrl())
+	if err != nil {
+		return createProxyErrorResp(pb.ProxyResponseError_INVALID_URL), nil
+	}
+
+	warmupUrl, err := parseWarmupUrl(in.GetWarmupUrl())
+	if err != nil {
+		return createProxyErrorResp(pb.ProxyResponseError_INVALID_URL), nil
+	}
+
+	retryOnCodes, err := parseRetryOnCodes(in.GetRetryOnCodes())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	proxiedResp, err := s.scheduler.execute(ctx, target, in.GetPriority(), retryOnCodes, warmupUrl)
+	if errors.Is(err, errHostOffline) {
+		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE), nil
+	}
+
+	if err != nil {
+		log.Printf("ERROR %s: %v", target.String(), err)
+		return createProxyErrorResp(pb.ProxyResponseError_PROXY_ERROR), nil
+	}
+
+	switch proxiedResp.Status {
+	case ResponseStatusOk:
+	case ResponseStatusRequestCancelled:
+		if ctx.Err() != nil {
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+
+		return nil, status.Error(codes.Canceled, "request cancelled")
+	case ResponseStatusTimeout:
+		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_TIMED_OUT), nil
+	case ResponseStatusHostUnreachable:
+		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE), nil
+	default:
+		return createProxyErrorResp(pb.ProxyResponseError_PROXY_ERROR), nil
+	}
+
+	return &pb.ProxyResponse{
+		Response: &pb.ProxyResponse_Success{
+			Success: &pb.ProxyResponseSuccess{
+				Body:    proxiedResp.Body,
+				Status:  int32(proxiedResp.Code),
+				Headers: successHeaders(proxiedResp.Headers),
+			},
+		},
+	}, nil
+}
+
+func newGrpcServer(scheduler *RequestScheduler) *grpc.Server {
+	grpcServer := grpc.NewServer(
+		grpc.MaxConcurrentStreams(math.MaxInt32),
+		grpc.MaxSendMsgSize(math.MaxInt32),
+		grpc.MaxRecvMsgSize(math.MaxInt32),
+	)
+	pb.RegisterProxyServer(grpcServer, &server{scheduler: scheduler})
+
+	return grpcServer
+}
+
+// runGrpcProxy serves gRPC on port until ctx is done, then stops gracefully.
+func runGrpcProxy(ctx context.Context, scheduler *RequestScheduler, port uint16) {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Fatalf("failed to start gprc server: %v", err)
 	}
 
-	grpc.MaxCallSendMsgSize(math.MaxInt32)
-	grpc.MaxCallRecvMsgSize(math.MaxInt32)
-	grpc.MaxConcurrentStreams(math.MaxInt32)
-	grpc.MaxSendMsgSize(math.MaxInt32)
-	grpc.MaxRecvMsgSize(math.MaxInt32)
+	grpcServer := newGrpcServer(scheduler)
 
-	s := grpc.NewServer()
-	pb.RegisterProxyServer(s, &server{})
+	go func() {
+		<-ctx.Done()
+		grpcServer.GracefulStop()
+	}()
 
-	if err := s.Serve(lis); err != nil {
+	log.Printf("grpc server listening at %v", listener.Addr())
+
+	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("failed to serve grpc: %v", err)
-	} else {
-		log.Printf("grpc server listening at %v", lis.Addr())
 	}
 }
