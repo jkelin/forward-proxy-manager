@@ -66,14 +66,20 @@ func TestBrowserIdentity(t *testing.T) {
 				t.Fatal("missing browser compression support")
 			}
 
+			// referer and cookie are ordered but only present on session navigations.
+			optional := map[string]bool{"referer": true, "cookie": true}
+			ordered := map[string]bool{}
 			for _, name := range headers[http.HeaderOrderKey] {
-				if headerValue(headers, name) == "" {
+				ordered[name] = true
+				if headerValue(headers, name) == "" && !optional[name] {
 					t.Fatalf("ordered header absent: %s", name)
 				}
 			}
 
-			if len(headers[http.HeaderOrderKey]) != len(headers)-1 {
-				t.Fatal("header order does not cover all headers")
+			for name := range headers {
+				if name != http.HeaderOrderKey && !ordered[name] {
+					t.Fatalf("header missing from order: %s", name)
+				}
 			}
 
 			if identity.Client == "Chrome" {

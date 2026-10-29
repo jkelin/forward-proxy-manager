@@ -52,6 +52,8 @@ type ActiveRequest struct {
 	Callback     chan<- *Response
 	Lock         sync.Mutex
 	RetryOnCodes []uint16
+	// WarmupUrl (x-warmup-url) is visited first by proxies without a session for Url's host; nil disables sessions.
+	WarmupUrl *url.URL
 }
 
 var requestCounter uint64 = 0
@@ -62,6 +64,7 @@ func initializeRequest(
 	uri *url.URL,
 	priority int64,
 	retryOnCodes []uint16,
+	warmupUrl *url.URL,
 	ctx context.Context,
 ) (*ActiveRequest, <-chan *Response, error) {
 	hostInfo := getHostInfo(uri.Hostname())
@@ -83,6 +86,7 @@ func initializeRequest(
 		Callback:     callback,
 		Context:      ctx,
 		RetryOnCodes: retryOnCodes,
+		WarmupUrl:    warmupUrl,
 	}
 
 	newRequestsBroacast.Submit(req)
@@ -147,6 +151,9 @@ func (request *ActiveRequest) executeAt(proxy *ProxyClient) {
 				return
 			}
 
+			retry = true
+		} else if isSessionRejected(resp.Code, request.WarmupUrl != nil) {
+			// makeRequestWithClient already reset this proxy's session; another proxy (or a fresh warm-up) gets the retry.
 			retry = true
 		}
 

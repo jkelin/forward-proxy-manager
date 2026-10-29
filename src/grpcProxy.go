@@ -50,7 +50,7 @@ func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.Prox
 		}
 	}
 
-	_, respChan, err := initializeRequest(url, priority, retryOnCodes, ctx)
+	_, respChan, err := initializeRequest(url, priority, retryOnCodes, nil, ctx)
 	if err != nil {
 		log.Printf("ERROR %s: %v", url.String(), err)
 		return createProxyErrorResp(pb.ProxyResponseError_PROXY_ERROR), nil

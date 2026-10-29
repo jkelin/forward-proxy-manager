@@ -16,6 +16,7 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/dustin/go-broadcast"
 	"github.com/inhies/go-bytesize"
 	"github.com/throttled/throttled"
@@ -65,21 +66,62 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 
 	req.Url.Host = withoutDefaultPort(req.Url)
 
-	request, err := fhttp.NewRequestWithContext(requestCtx, req.Method, req.Url.String(), nil)
+	headers := client.headers
+	warmupStatus := ""
+
+	if req.WarmupUrl != nil {
+		status, failedResponse, err := client.ensureWarm(requestCtx, req.WarmupUrl, req.Url)
+		if err != nil {
+			return client.handleError(req, req.WarmupUrl, req.Context, err)
+		}
+
+		if failedResponse != nil {
+			client.resetSession()
+			failedResponse.Headers.Set(warmupStatusHeader, status)
+
+			return failedResponse, nil
+		}
+
+		warmupStatus = status
+		headers = navigationHeaders(headers, req.WarmupUrl, req.Url)
+	}
+
+	response, err := client.send(requestCtx, req.Method, req.Url, headers)
+	if err != nil {
+		return client.handleError(req, req.Url, req.Context, err)
+	}
+
+	log.Printf("%dp %s %s %s %d %s, %dms", req.Priority, client.id, req.Method, req.Url.String(), response.Code, bytesize.New(float64(len(response.Body))), time.Since(start).Milliseconds())
+
+	if req.WarmupUrl != nil {
+		if isSessionRejected(response.Code, true) {
+			client.resetSession()
+		}
+
+		response.Headers.Set(warmupStatusHeader, warmupStatus)
+	}
+
+	return response, nil
+}
+
+// send performs one request with the given headers; cookies come from and go to the client's jar.
+// Only Content-Type and Content-Disposition are passed back to callers.
+func (client *ProxyClient) send(ctx context.Context, method string, target *url.URL, headers fhttp.Header) (*Response, error) {
+	request, err := fhttp.NewRequestWithContext(ctx, method, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	request.Header = client.headers.Clone()
+	request.Header = headers.Clone()
 
 	// tls-client negotiates h2/http1.1 via the profile's ALPN, like the impersonated browser.
 	resp, err := client.httpClient.Do(request)
 	if err != nil {
-		return client.handleError(req, req.Url, req.Context, err)
+		return nil, err
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			log.Printf("Error closing body in makeRequestWithClient: %v", err)
+			log.Printf("Error closing body in send: %v", err)
 		}
 	}()
 
@@ -91,13 +133,10 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 
 	body, err := decodeResponseBody(resp.Body, contentEncoding)
 	if err != nil {
-		return client.handleError(req, req.Url, req.Context, err)
+		return nil, err
 	}
 
-	duration := time.Since(start)
-	log.Printf("%dp %s %s %s %d %s, %dms", req.Priority, client.id, req.Method, req.Url.String(), resp.StatusCode, bytesize.New(float64(len(body))), duration.Milliseconds())
-
-	mainResponse := Response{
+	response := Response{
 		Status:  ResponseStatusOk,
 		Code:    resp.StatusCode,
 		Body:    body,
@@ -105,14 +144,14 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 	}
 
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
-		mainResponse.Headers.Set("Content-Type", contentType)
+		response.Headers.Set("Content-Type", contentType)
 	}
 
-	if contentType := resp.Header.Get("Content-Disposition"); contentType != "" {
-		mainResponse.Headers.Set("Content-Disposition", contentType)
+	if contentDisposition := resp.Header.Get("Content-Disposition"); contentDisposition != "" {
+		response.Headers.Set("Content-Disposition", contentDisposition)
 	}
 
-	return &mainResponse, nil
+	return &response, nil
 }
 
 // withoutDefaultPort drops the scheme's default port, as browsers omit it from Host/:authority.
@@ -178,13 +217,51 @@ func getProxiesFromUrl(url string) ([]ProxyConfig, error) {
 	return res, nil
 }
 
-// ProxyClient is one SOCKS exit with one stable browser identity: TLS/HTTP2 profile and matching headers.
+// ProxyClient is one SOCKS exit with one stable browser identity: TLS/HTTP2 profile, matching headers
+// and its own cookie session, like one real browser on one IP.
 type ProxyClient struct {
 	id                string
 	httpClient        tls_client.HttpClient
 	headers           fhttp.Header
+	cookies           *sessionJar
+	warmupLock        sync.Mutex
+	warmedHosts       map[string]struct{}
 	limiter           *throttled.GCRARateLimiter
 	lastUnreachableAt *time.Time
+}
+
+// newProxyClient builds a client impersonating profile; options add the transport (proxy, TLS verification).
+func newProxyClient(id string, profile profiles.ClientProfile, limiter *throttled.GCRARateLimiter, options ...tls_client.HttpClientOption) (*ProxyClient, error) {
+	cookies := newSessionJar()
+	idleConnTimeout := 60 * time.Second
+
+	options = append(options,
+		tls_client.WithClientProfile(profile),
+		tls_client.WithTimeoutSeconds(10),
+		tls_client.WithCookieJar(cookies),
+		tls_client.WithTransportOptions(&tls_client.TransportOptions{
+			MaxIdleConns:    1024,
+			MaxConnsPerHost: 12,
+			IdleConnTimeout: &idleConnTimeout,
+		}),
+	)
+	if shufflesTlsExtensions(profile) {
+		options = append(options, tls_client.WithRandomTLSExtensionOrder())
+	}
+
+	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProxyClient{
+		id:          id,
+		httpClient:  httpClient,
+		headers:     getFakeHeaders(profile),
+		cookies:     cookies,
+		warmedHosts: make(map[string]struct{}),
+		limiter:     limiter,
+	}, nil
 }
 
 func (client *ProxyClient) RateLimit(host HostInfo) (bool, throttled.RateLimitResult, error) {
@@ -276,36 +353,14 @@ func runProxyManager(ctx context.Context) {
 				User:   url.UserPassword(config.username, config.password),
 				Host:   net.JoinHostPort(config.host, strconv.FormatInt(config.port, 10)),
 			}
-			idleConnTimeout := 60 * time.Second
 
-			options := []tls_client.HttpClientOption{
-				tls_client.WithClientProfile(profile),
-				tls_client.WithProxyUrl(proxyUrl.String()),
-				tls_client.WithTimeoutSeconds(10),
-				tls_client.WithTransportOptions(&tls_client.TransportOptions{
-					MaxIdleConns:    1024,
-					MaxConnsPerHost: 12,
-					IdleConnTimeout: &idleConnTimeout,
-				}),
-			}
-			if shufflesTlsExtensions(profile) {
-				options = append(options, tls_client.WithRandomTLSExtensionOrder())
-			}
-
-			httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+			myClient, err := newProxyClient(config.host, profile, createLimiter(), tls_client.WithProxyUrl(proxyUrl.String()))
 			if err != nil {
 				log.Printf("Error connecting to proxy: %v", err)
 				return
 			}
 
-			myClient := ProxyClient{
-				id:         config.host,
-				httpClient: httpClient,
-				headers:    getFakeHeaders(profile),
-				limiter:    createLimiter(),
-			}
-
-			ip, err := getExternalProxyIp(&myClient, ctx)
+			ip, err := getExternalProxyIp(myClient, ctx)
 			if err != nil {
 				log.Printf("Error connecting to proxy: %v", err)
 				return
@@ -315,7 +370,7 @@ func runProxyManager(ctx context.Context) {
 
 			log.Printf("Proxy %s ready", *ip)
 
-			readyProxies = append(readyProxies, &myClient)
+			readyProxies = append(readyProxies, myClient)
 			proxiesToSend := make([]*ProxyClient, len(readyProxies))
 
 			copy(proxiesToSend, readyProxies)

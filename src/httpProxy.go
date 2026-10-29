@@ -66,9 +66,15 @@ func OnRequest(ctx *httpproxy.Context, req *http.Request) (
 		req.Header.Del("x-priority")
 	}
 
+	// x-* headers are FPM control headers; outbound requests use the identity's headers only, so they never leak.
+	warmupUrl, err := parseWarmupUrl(req.Header.Get(warmupUrlHeader))
+	if err != nil {
+		return createStringResp(fmt.Sprintf("Invalid %s: %v", warmupUrlHeader, err), 400)
+	}
+
 	retryOnCodes := make([]uint16, 0)
 
-	_, respChan, err := initializeRequest(req.URL, priority, retryOnCodes, req.Context())
+	_, respChan, err := initializeRequest(req.URL, priority, retryOnCodes, warmupUrl, req.Context())
 	if err != nil {
 		log.Printf("ERROR %s: %v", req.URL.String(), err)
 		return createStringResp("Proxy error", 500)

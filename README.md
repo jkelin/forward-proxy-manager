@@ -12,6 +12,7 @@ A proxy server that distributes your requests over a pool of proxies. It is made
 - Keeps track of rate limits on individual proxy-target pairs and backs off on 429 (Too Many Requests) errors
 - Retry mechanism for failed requests using alternative proxies
 - Replaces client headers with the identity's browser navigation headers; decodes gzip/deflate/br/zstd bodies
+- Optional per-proxy cookie session with warm-up page (`x-warmup-url` header)
 - Adjustable request priority using `x-priority` header
 - Built-in request queue for bulk requests without rate limit concerns
 - Optional web dashboard for real-time monitoring of pending requests
@@ -72,6 +73,20 @@ const data = await got({
 ```
 
 > Note: Since this proxy uses a self-signed certificate, you'll need to configure the HTTP client to ignore certificate validation.
+
+### 3. Cookie sessions (warm-up)
+
+Some sites (e.g. eBay search) reject requests without a session cookie. Each proxy keeps its own cookie jar (one browser on one IP). Send the control header:
+
+| Request header                                        | Meaning                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x-warmup-url: https://www.ebay.com/n/all-categories` | Absolute http(s) URL. If the chosen proxy has no session for the target host, it first GETs this URL as a typed navigation (`Sec-Fetch-Site: none`), storing its cookies. The real request then goes out as a link click: `Referer` and `Sec-Fetch-Site` derived from the warm-up URL (browser rules), plus the stored cookies. Invalid values return 400. |
+
+| Response header | Values                                                                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Fpm-Warmup`  | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
+
+A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC has no warm-up field yet.
 
 ## Options
 
