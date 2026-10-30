@@ -106,6 +106,7 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 		if failedResponse != nil {
 			client.resetSession()
 			failedResponse.Headers.Set(warmupStatusHeader, status)
+			failedResponse.Headers.Set(exitHeader, client.exit)
 
 			return failedResponse, nil
 		}
@@ -128,6 +129,8 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 
 		response.Headers.Set(warmupStatusHeader, warmupStatus)
 	}
+
+	response.Headers.Set(exitHeader, client.exit)
 
 	return response, nil
 }
@@ -280,10 +283,16 @@ type exitLimits struct {
 	clock              func() time.Time
 }
 
+// exitHeader names the SOCKS endpoint (host:port, never credentials) that answered, for client diagnostics.
+const exitHeader = "X-Fpm-Exit"
+
 // ProxyClient is one SOCKS exit with one stable browser identity: TLS/HTTP2 profile, matching headers
 // and its own cookie session, like one real browser on one IP.
 type ProxyClient struct {
-	id          string
+	// id names the exit in logs; it becomes the public IP once the IP check passed.
+	id string
+	// exit is the SOCKS endpoint host:port from the proxy list; sent back in exitHeader.
+	exit        string
 	httpClient  tls_client.HttpClient
 	headers     fhttp.Header
 	cookies     *sessionJar
@@ -320,7 +329,8 @@ func newLimiter(requestsPerMin int, burst int, clock func() time.Time) (*throttl
 }
 
 // newProxyClient builds a client impersonating profile; options add the transport (proxy, TLS verification).
-func newProxyClient(id string, profile profiles.ClientProfile, limits exitLimits, options ...tls_client.HttpClientOption) (*ProxyClient, error) {
+// exit is the SOCKS endpoint host:port; it also names the client until its public IP is known.
+func newProxyClient(exit string, profile profiles.ClientProfile, limits exitLimits, options ...tls_client.HttpClientOption) (*ProxyClient, error) {
 	limiter, err := newLimiter(limits.requestsPerMin, limits.burst, limits.clock)
 	if err != nil {
 		return nil, err
@@ -349,7 +359,8 @@ func newProxyClient(id string, profile profiles.ClientProfile, limits exitLimits
 	}
 
 	return &ProxyClient{
-		id:           id,
+		id:           exit,
+		exit:         exit,
 		httpClient:   httpClient,
 		headers:      getFakeHeaders(profile),
 		cookies:      cookies,
@@ -458,7 +469,7 @@ func (manager *proxyManager) connect(ctx context.Context, config ProxyConfig) (*
 
 	options := append(slices.Clone(manager.clientOptions), tls_client.WithProxyUrl(proxyUrl.String()))
 
-	client, err := newProxyClient(config.host, profile, manager.limits, options...)
+	client, err := newProxyClient(net.JoinHostPort(config.host, strconv.FormatInt(config.port, 10)), profile, manager.limits, options...)
 	if err != nil {
 		return nil, err
 	}

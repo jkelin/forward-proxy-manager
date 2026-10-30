@@ -88,6 +88,13 @@ func (server *socksServer) config() ProxyConfig {
 	return ProxyConfig{host: address.IP.String(), port: int64(address.Port), username: server.username, password: server.password}
 }
 
+// exit is the host:port FPM reports in X-Fpm-Exit for clients built on this server.
+func (server *socksServer) exit() string {
+	config := server.config()
+
+	return net.JoinHostPort(config.host, strconv.FormatInt(config.port, 10))
+}
+
 func (server *socksServer) proxyUrl(password string) string {
 	config := server.config()
 
@@ -292,7 +299,7 @@ func newSocksProxyClient(t *testing.T, socks *socksServer, limits exitLimits) *P
 func newSocksProxyClientWithPassword(t *testing.T, socks *socksServer, password string, limits exitLimits) *ProxyClient {
 	t.Helper()
 
-	client, err := newProxyClient(socks.config().host, profiles.Chrome_144, limits,
+	client, err := newProxyClient(socks.exit(), profiles.Chrome_144, limits,
 		tls_client.WithProxyUrl(socks.proxyUrl(password)),
 		tls_client.WithInsecureSkipVerify(),
 	)

@@ -461,6 +461,10 @@ func TestGrpcWarmupEndToEnd(t *testing.T) {
 		if success.GetStatus() != http.StatusOK || string(success.GetBody()) != "results" || success.GetHeaders()["x-fpm-warmup"] != expected {
 			t.Fatalf("want %s: got %v", expected, response)
 		}
+
+		if exit := success.GetHeaders()["x-fpm-exit"]; exit != socks.exit() {
+			t.Fatalf("x-fpm-exit = %q, want %q", exit, socks.exit())
+		}
 	}
 }
 
@@ -473,7 +477,7 @@ func TestGrpcWarmupFailedReturnsWarmupResponse(t *testing.T) {
 	response := sendGrpc(t, startGrpc(t, scheduler), &pb.ProxyRequest{Url: base + "/search", WarmupUrl: proto.String(base + "/warm")})
 	success := response.GetSuccess()
 
-	if success.GetStatus() != http.StatusServiceUnavailable || string(success.GetBody()) != "warm-up blocked" || success.GetHeaders()["x-fpm-warmup"] != "failed" {
+	if success.GetStatus() != http.StatusServiceUnavailable || string(success.GetBody()) != "warm-up blocked" || success.GetHeaders()["x-fpm-warmup"] != "failed" || success.GetHeaders()["x-fpm-exit"] != socks.exit() {
 		t.Fatalf("got %v", response)
 	}
 }

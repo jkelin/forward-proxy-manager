@@ -282,6 +282,10 @@ func TestHttpProxyPlainEndToEnd(t *testing.T) {
 		t.Fatal("only Content-Type and Content-Disposition are passed back")
 	}
 
+	if exit := response.Header.Get("X-Fpm-Exit"); exit != socks.exit() || strings.Contains(exit, "secret") {
+		t.Fatalf("X-Fpm-Exit = %q, want %q", exit, socks.exit())
+	}
+
 	lock.Lock()
 	defer lock.Unlock()
 

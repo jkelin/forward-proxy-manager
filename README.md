@@ -85,6 +85,7 @@ Some sites (e.g. eBay search) reject requests without a session cookie. Each pro
 | Response header | Values                                                                                                                                            |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `X-Fpm-Warmup`  | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
+| `X-Fpm-Exit`    | SOCKS endpoint `host:port` from the proxy list that answered (no credentials); absent on proxy error responses                                    |
 
 A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC uses the `warmup_url` field instead of the header (see [gRPC Proxy](#grpc-proxy)).
 
@@ -133,7 +134,7 @@ Forward Proxy Manager also provides a gRPC proxy for more advanced use cases. It
 - `warmup_url` has the same semantics as the HTTP `x-warmup-url` header. An invalid value returns `INVALID_URL`. The success header `x-fpm-warmup` is `fresh`, `reused` or `failed`; it is present only when `warmup_url` is set. On `failed` the response is the warm-up response.
 - `retry_on_codes` outside 100-599 returns gRPC status `INVALID_ARGUMENT`.
 - A target host that is unreachable through the exits returns `REMOTE_HOST_UNREACHABLE` (HTTP proxy: 502 `Remote host unreachable`).
-- Success header names are lower-case (`content-type`, `x-fpm-warmup`).
+- Success header names are lower-case (`content-type`, `x-fpm-warmup`, `x-fpm-exit`).
 - Client cancellation or deadline removes the request from the queue or aborts it; the RPC ends with gRPC status `CANCELLED` or `DEADLINE_EXCEEDED`.
 
 ### Node / Bun client

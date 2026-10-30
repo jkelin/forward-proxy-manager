@@ -432,9 +432,9 @@ func TestProxyClientThroughSocks(t *testing.T) {
 				t.Fatalf("unexpected response %+v (%q)", response, response.Body)
 			}
 
-			expectedHeaders := http.Header{"Content-Type": {"text/html; charset=utf-8"}, "Content-Disposition": {"inline"}}
+			expectedHeaders := http.Header{"Content-Type": {"text/html; charset=utf-8"}, "Content-Disposition": {"inline"}, "X-Fpm-Exit": {socks.exit()}}
 			if !reflect.DeepEqual(response.Headers, expectedHeaders) {
-				t.Fatalf("only content headers pass back, got %v", response.Headers)
+				t.Fatalf("only content headers and the exit pass back, got %v", response.Headers)
 			}
 
 			if target.String() != original {
