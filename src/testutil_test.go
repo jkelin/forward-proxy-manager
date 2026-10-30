@@ -36,17 +36,6 @@ func testLimits() exitLimits {
 	}
 }
 
-// onlineHost reports every host as reachable; https decides the scheme requests are sent with.
-func onlineHost(https bool) func(host string) *HostInfo {
-	return func(host string) *HostInfo {
-		return &HostInfo{host: host, supportsHttp: !https, supportsHttps: https, supportsIPv4: true}
-	}
-}
-
-func offlineHost(host string) *HostInfo {
-	return &HostInfo{host: host}
-}
-
 // SOCKS5 reply codes (RFC 1928).
 const (
 	socksSucceeded          byte = 0x00

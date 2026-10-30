@@ -65,8 +65,7 @@ func successHeaders(headers map[string][]string) map[string]string {
 
 // SendRequest proxies one GET through the pool.
 // Edge cases: an invalid url or warmup_url returns INVALID_URL; invalid retry_on_codes return InvalidArgument;
-// a target failing the reachability check returns REMOTE_HOST_UNREACHABLE; client cancellation or deadline returns
-// the matching gRPC status instead of a response.
+// client cancellation or deadline returns the matching gRPC status instead of a response.
 func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.ProxyResponse, error) {
 	target, err := parseAbsoluteHttpUrl(in.GetUrl())
 	if err != nil {
@@ -84,8 +83,8 @@ func (s *server) SendRequest(ctx context.Context, in *pb.ProxyRequest) (*pb.Prox
 	}
 
 	proxiedResp, err := s.scheduler.execute(ctx, target, in.GetPriority(), retryOnCodes, warmupUrl)
-	if errors.Is(err, errHostOffline) {
-		return createProxyErrorResp(pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE), nil
+	if errors.Is(err, errInvalidTarget) {
+		return createProxyErrorResp(pb.ProxyResponseError_INVALID_URL), nil
 	}
 
 	if err != nil {

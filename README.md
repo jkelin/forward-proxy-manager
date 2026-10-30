@@ -92,22 +92,23 @@ A 403 from the warm-up or the real request clears that proxy's cookies and retri
 
 Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [src/main.go](src/main.go). [.env.example](.env.example) lists all variables with defaults.
 
-| Environment                 | Default                  | Description                                                                                       |
-| --------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------- |
-| `PROXY_LIST_URL`            | **REQUIRED**             | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below      |
-| `IP_CHECK_URL`              | `https://ifconfig.io/ip` | Absolute http(s) URL returning the exit IP; used to check proxy availability                      |
-| `REQUEST_TIMEOUT`           | `20s`                    | Timeout for individual requests to target host                                                    |
-| `RETRIES`                   | `1`                      | Number of times to retry failed requests to target (`>= 0`)                                       |
-| `RETRY_TIMEOUT`             | `5s`                     | How long one proxy avoids a host after the host answered 429                                      |
-| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                    | Timeout for proxy IP info request used to check proxy availability                                |
-| `HOST_INFO_REQUEST_TIMEOUT` | `5s`                     | Timeout for host info request which we need to get information about HTTP/HTTPS/IPV6 availability |
-| `THROTTLE_REQUESTS_PER_MIN` | `30`                     | Target host max requests per minute                                                               |
-| `THROTTLE_REQUESTS_BURST`   | `5`                      | Max concurrent target requests for a single proxy                                                 |
-| `UNREACHABLE_CLIENT_RETRY`  | `60s`                    | Retry for failing proxies                                                                         |
-| `ENABLE_WEB`                | `false`                  | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                         |
-| `PROXY_PORT`                | `8080`                   | HTTP(S) proxy listen port                                                                         |
-| `WEB_PORT`                  | `8081`                   | Web UI listen port                                                                                |
-| `GRPC_PORT`                 | `8082`                   | gRPC listen port                                                                                  |
+| Environment                 | Default                  | Description                                                                                  |
+| --------------------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
+| `PROXY_LIST_URL`            | **REQUIRED**             | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below |
+| `IP_CHECK_URL`              | `https://ifconfig.io/ip` | Absolute http(s) URL returning the exit IP; used to check proxy availability                 |
+| `REQUEST_TIMEOUT`           | `20s`                    | Timeout for individual requests to target host                                               |
+| `RETRIES`                   | `1`                      | Number of times to retry failed requests to target (`>= 0`)                                  |
+| `RETRY_TIMEOUT`             | `5s`                     | How long one proxy avoids a host after the host answered 429                                 |
+| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                    | Timeout for proxy IP info request used to check proxy availability                           |
+| `THROTTLE_REQUESTS_PER_MIN` | `30`                     | Target host max requests per minute                                                          |
+| `THROTTLE_REQUESTS_BURST`   | `5`                      | Max concurrent target requests for a single proxy                                            |
+| `UNREACHABLE_CLIENT_RETRY`  | `60s`                    | Retry for failing proxies                                                                    |
+| `ENABLE_WEB`                | `false`                  | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                    |
+| `PROXY_PORT`                | `8080`                   | HTTP(S) proxy listen port                                                                    |
+| `WEB_PORT`                  | `8081`                   | Web UI listen port                                                                           |
+| `GRPC_PORT`                 | `8082`                   | gRPC listen port                                                                             |
+
+Proxy Manager never contacts a target directly: no DNS lookup or reachability probe leaves its own IP. Requests keep their URL scheme; a target that is down shows up as an exit error after retries.
 
 ## Proxy list format
 
@@ -131,7 +132,7 @@ Forward Proxy Manager also provides a gRPC proxy for more advanced use cases. It
 - `url` must be an absolute http(s) URL, else `ProxyResponseError` `INVALID_URL`.
 - `warmup_url` has the same semantics as the HTTP `x-warmup-url` header. An invalid value returns `INVALID_URL`. The success header `x-fpm-warmup` is `fresh`, `reused` or `failed`; it is present only when `warmup_url` is set. On `failed` the response is the warm-up response.
 - `retry_on_codes` outside 100-599 returns gRPC status `INVALID_ARGUMENT`.
-- A target host that is offline returns `REMOTE_HOST_UNREACHABLE` (HTTP proxy: 502 `Remote host unreachable`).
+- A target host that is unreachable through the exits returns `REMOTE_HOST_UNREACHABLE` (HTTP proxy: 502 `Remote host unreachable`).
 - Success header names are lower-case (`content-type`, `x-fpm-warmup`).
 - Client cancellation or deadline removes the request from the queue or aborts it; the RPC ends with gRPC status `CANCELLED` or `DEADLINE_EXCEEDED`.
 

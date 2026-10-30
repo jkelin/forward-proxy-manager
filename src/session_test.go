@@ -424,7 +424,7 @@ func (state *warmupServer) request(t *testing.T, path string, warmupPath string)
 	request := &ActiveRequest{
 		Url:     mustParseUrl(t, state.server.URL+path),
 		Method:  "GET",
-		Host:    HostInfo{host: "127.0.0.1", supportsHttps: true},
+		Host:    HostInfo{host: "127.0.0.1"},
 		Context: context.Background(),
 	}
 
@@ -644,7 +644,7 @@ func TestWarmupIsPerTargetHost(t *testing.T) {
 	request := &ActiveRequest{
 		Url:       mustParseUrl(t, "https://localhost:"+port+"/open"),
 		Method:    "GET",
-		Host:      HostInfo{host: "localhost", supportsHttps: true},
+		Host:      HostInfo{host: "localhost"},
 		Context:   context.Background(),
 		WarmupUrl: mustParseUrl(t, "https://localhost:"+port+"/warm"),
 	}

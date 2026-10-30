@@ -95,25 +95,23 @@ func TestOnRequestResponses(t *testing.T) {
 
 	for _, testCase := range []struct {
 		name    string
-		lookup  func(host string) *HostInfo
 		respond func(*ActiveRequest, int) (*Response, error)
 		ctx     context.Context
 		headers map[string]string
 		code    int
 		body    string
 	}{
-		{"relative warmup", onlineHost(false), respondWith(200), nil, map[string]string{"x-warmup-url": "/warm"}, 400, "Invalid x-warmup-url"},
-		{"ftp warmup", onlineHost(false), respondWith(200), nil, map[string]string{"x-warmup-url": "ftp://a.test/"}, 400, "Invalid x-warmup-url"},
-		{"host-less warmup", onlineHost(false), respondWith(200), nil, map[string]string{"x-warmup-url": "https://:443/"}, 400, "Invalid x-warmup-url"},
-		{"host offline", offlineHost, respondWith(200), nil, nil, 502, "Remote host unreachable"},
-		{"timeout", onlineHost(false), respondSequence(&Response{Status: ResponseStatusTimeout}), nil, nil, 502, "Remote host timed out"},
-		{"host unreachable", onlineHost(false), respondSequence(&Response{Status: ResponseStatusHostUnreachable}), nil, nil, 502, "Remote host unreachable"},
-		{"unknown status", onlineHost(false), respondSequence(&Response{Status: ResponseStatusUnknownError}), nil, nil, 500, "Proxy error"},
-		{"unknown error", onlineHost(false), func(*ActiveRequest, int) (*Response, error) { return nil, errors.New("boom") }, nil, nil, 500, "Proxy error"},
-		{"client gone", onlineHost(false), waitForContext, cancelled, nil, statusClientClosedRequest, "Request cancelled"},
+		{"relative warmup", respondWith(200), nil, map[string]string{"x-warmup-url": "/warm"}, 400, "Invalid x-warmup-url"},
+		{"ftp warmup", respondWith(200), nil, map[string]string{"x-warmup-url": "ftp://a.test/"}, 400, "Invalid x-warmup-url"},
+		{"host-less warmup", respondWith(200), nil, map[string]string{"x-warmup-url": "https://:443/"}, 400, "Invalid x-warmup-url"},
+		{"timeout", respondSequence(&Response{Status: ResponseStatusTimeout}), nil, nil, 502, "Remote host timed out"},
+		{"host unreachable", respondSequence(&Response{Status: ResponseStatusHostUnreachable}), nil, nil, 502, "Remote host unreachable"},
+		{"unknown status", respondSequence(&Response{Status: ResponseStatusUnknownError}), nil, nil, 500, "Proxy error"},
+		{"unknown error", func(*ActiveRequest, int) (*Response, error) { return nil, errors.New("boom") }, nil, nil, 500, "Proxy error"},
+		{"client gone", waitForContext, cancelled, nil, statusClientClosedRequest, "Request cancelled"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			scheduler := newRequestScheduler(0, time.Second, testCase.lookup)
+			scheduler := newRequestScheduler(0, time.Second)
 			scheduler.idleInterval = 10 * time.Millisecond
 			exit := newFakeExit("only", testCase.respond)
 			startScheduler(t, scheduler, exit)
@@ -267,7 +265,7 @@ func TestHttpProxyPlainEndToEnd(t *testing.T) {
 	}))
 
 	socks := startSocksServer(t, "user", "secret")
-	scheduler := newRequestScheduler(0, 5*time.Second, onlineHost(false))
+	scheduler := newRequestScheduler(0, 5*time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 	startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 
@@ -304,7 +302,7 @@ func TestHttpProxyPlainEndToEnd(t *testing.T) {
 
 func TestHttpProxyMitmWarmupEndToEnd(t *testing.T) {
 	socks, base := warmupSite(t, http.StatusOK)
-	scheduler := newRequestScheduler(0, 5*time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(0, 5*time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 	startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 	client := startHttpProxy(t, scheduler)
@@ -324,7 +322,7 @@ func TestHttpProxyMitmWarmupEndToEnd(t *testing.T) {
 
 func TestHttpProxyMitmWarmupFailed(t *testing.T) {
 	socks, base := warmupSite(t, http.StatusServiceUnavailable)
-	scheduler := newRequestScheduler(0, 5*time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(0, 5*time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 	startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 

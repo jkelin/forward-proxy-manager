@@ -405,23 +405,21 @@ func TestProxyClientThroughSocks(t *testing.T) {
 
 	for _, testCase := range []struct {
 		name  string
-		https bool
 		path  string
 		code  int
 		body  string
 		proto string
 	}{
-		{"https h2", true, "/page", http.StatusAccepted, "<p>plain</p>", "HTTP/2.0"},
-		{"https gzip", true, "/gzip", http.StatusOK, "<p>compressed</p>", "HTTP/2.0"},
+		{"https h2", "/page", http.StatusAccepted, "<p>plain</p>", "HTTP/2.0"},
+		{"https gzip", "/gzip", http.StatusOK, "<p>compressed</p>", "HTTP/2.0"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			// The URL arrives as http; HostInfo decides the scheme, like MITM'd requests.
-			original := "http://" + strings.TrimPrefix(tlsTarget.URL, "https://") + testCase.path
+			original := tlsTarget.URL + testCase.path
 			target := mustParseUrl(t, original)
 			request := &ActiveRequest{
 				Url:     target,
 				Method:  http.MethodGet,
-				Host:    *onlineHost(testCase.https)(target.Hostname()),
+				Host:    HostInfo{host: target.Hostname()},
 				Context: context.Background(),
 			}
 
@@ -467,7 +465,7 @@ func TestProxyClientPlainHttpThroughSocks(t *testing.T) {
 
 	uri := mustParseUrl(t, target.URL+"/")
 	response, err := client.makeRequestWithClient(&ActiveRequest{
-		Url: uri, Method: http.MethodGet, Host: *onlineHost(false)(uri.Hostname()), Context: context.Background(),
+		Url: uri, Method: http.MethodGet, Host: HostInfo{host: uri.Hostname()}, Context: context.Background(),
 	}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -564,7 +562,7 @@ func TestProxyClientFailureMapping(t *testing.T) {
 			uri := mustParseUrl(t, rawUrl+"/")
 
 			response, err := client.makeRequestWithClient(&ActiveRequest{
-				Url: uri, Method: http.MethodGet, Host: *onlineHost(true)(uri.Hostname()), Context: context.Background(),
+				Url: uri, Method: http.MethodGet, Host: HostInfo{host: uri.Hostname()}, Context: context.Background(),
 			}, testCase.timeout)
 			if err != nil {
 				t.Fatalf("expected a status, got error %v", err)
@@ -585,7 +583,7 @@ func TestProxyClientFailureMapping(t *testing.T) {
 		time.AfterFunc(100*time.Millisecond, cancel)
 
 		response, err := client.makeRequestWithClient(&ActiveRequest{
-			Url: uri, Method: http.MethodGet, Host: *onlineHost(true)(uri.Hostname()), Context: ctx,
+			Url: uri, Method: http.MethodGet, Host: HostInfo{host: uri.Hostname()}, Context: ctx,
 		}, 5*time.Second)
 		if response != nil || !errors.Is(err, context.Canceled) {
 			t.Fatalf("got %+v %v", response, err)

@@ -84,7 +84,7 @@ func (client *ProxyClient) handleError(callerCtx context.Context, method string,
 }
 
 // makeRequestWithClient sends req through this exit, warming the session first when req asks for it.
-// The target scheme follows req.Host (https when supported); req.Url itself is never modified.
+// The target scheme is req.Url's own; req.Url itself is never modified.
 func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout time.Duration) (*Response, error) {
 	start := time.Now()
 
@@ -92,12 +92,6 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 	defer cancelFn()
 
 	target := *req.Url
-	if req.Host.supportsHttps {
-		target.Scheme = "https"
-	} else {
-		target.Scheme = "http"
-	}
-
 	target.Host = withoutDefaultPort(&target)
 
 	headers := client.headers
@@ -415,7 +409,7 @@ func getExternalProxyIp(ctx context.Context, client *ProxyClient, ipCheckUrl *ur
 		Url:      &target,
 		Method:   http.MethodGet,
 		Priority: 10000,
-		Host:     HostInfo{host: target.Hostname(), supportsHttps: target.Scheme == "https"},
+		Host:     HostInfo{host: target.Hostname()},
 		Context:  ctx,
 	}
 

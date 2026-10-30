@@ -125,7 +125,7 @@ func identityOrder(length int) []int {
 }
 
 func newTestScheduler(retries int) *RequestScheduler {
-	scheduler := newRequestScheduler(retries, time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(retries, time.Second)
 	scheduler.shuffle = identityOrder
 	scheduler.idleInterval = 10 * time.Millisecond
 
@@ -257,14 +257,32 @@ func TestSubmit(t *testing.T) {
 	}
 }
 
-func TestSubmitOfflineHost(t *testing.T) {
-	scheduler := newRequestScheduler(0, time.Second, offlineHost)
+// FPM never resolves or probes a target itself: an unresolvable host still goes to an exit, so only exits decide
+// reachability and the FPM machine's IP never reaches a target.
+func TestSubmitSendsUnresolvableHostsToExits(t *testing.T) {
+	scheduler := newTestScheduler(0)
+	exit := newFakeExit("only", respondWith(http.StatusOK))
+	startScheduler(t, scheduler, exit)
 
-	if _, _, err := scheduler.submit(context.Background(), mustParseUrl(t, "https://down.test/"), 0, nil, nil); !errors.Is(err, errHostOffline) {
+	response, err := scheduler.execute(context.Background(), mustParseUrl(t, "https://down.invalid/"), 0, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response.Status != ResponseStatusOk || response.Code != http.StatusOK || exit.attemptCount() != 1 {
+		t.Fatalf("got %+v after %d attempt(s)", response, exit.attemptCount())
+	}
+}
+
+func TestSubmitRejectsInvalidTargets(t *testing.T) {
+	scheduler := newTestScheduler(0)
+	target := &url.URL{Scheme: "ftp", Host: "a.test"}
+
+	if _, _, err := scheduler.submit(context.Background(), target, 0, nil, nil); !errors.Is(err, errInvalidTarget) {
 		t.Fatalf("got %v", err)
 	}
 
-	if _, err := scheduler.execute(context.Background(), mustParseUrl(t, "https://down.test/"), 0, nil, nil); !errors.Is(err, errHostOffline) {
+	if _, err := scheduler.execute(context.Background(), target, 0, nil, nil); !errors.Is(err, errInvalidTarget) {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -465,7 +483,7 @@ func TestDispatchShufflesExits(t *testing.T) {
 }
 
 func TestDefaultShuffleIsPermutation(t *testing.T) {
-	scheduler := newRequestScheduler(0, time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(0, time.Second)
 
 	for length := range 8 {
 		indices := scheduler.shuffle(length)
@@ -730,7 +748,7 @@ func TestSchedulerPassesRequestFields(t *testing.T) {
 }
 
 func TestSchedulerManyRequests(t *testing.T) {
-	scheduler := newRequestScheduler(1, time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(1, time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 
 	exits := []proxyExit{

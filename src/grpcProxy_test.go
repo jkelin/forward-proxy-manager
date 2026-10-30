@@ -168,19 +168,17 @@ func TestGrpcRejectsInvalidInput(t *testing.T) {
 func TestGrpcStatusMapping(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
-		lookup   func(host string) *HostInfo
 		respond  func(*ActiveRequest, int) (*Response, error)
 		expected pb.ProxyResponseError_ErrorType
 	}{
-		{"host offline", offlineHost, respondWith(200), pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE},
-		{"timeout", onlineHost(true), respondSequence(&Response{Status: ResponseStatusTimeout}), pb.ProxyResponseError_REMOTE_HOST_TIMED_OUT},
-		{"host unreachable", onlineHost(true), respondSequence(&Response{Status: ResponseStatusHostUnreachable}), pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE},
-		{"unknown status", onlineHost(true), respondSequence(&Response{Status: ResponseStatusUnknownError}), pb.ProxyResponseError_PROXY_ERROR},
-		{"unknown error", onlineHost(true), func(*ActiveRequest, int) (*Response, error) { return nil, errors.New("boom") }, pb.ProxyResponseError_PROXY_ERROR},
-		{"dropped connection", onlineHost(true), func(*ActiveRequest, int) (*Response, error) { return nil, fmt.Errorf("read: %w", io.ErrUnexpectedEOF) }, pb.ProxyResponseError_PROXY_ERROR},
+		{"timeout", respondSequence(&Response{Status: ResponseStatusTimeout}), pb.ProxyResponseError_REMOTE_HOST_TIMED_OUT},
+		{"host unreachable", respondSequence(&Response{Status: ResponseStatusHostUnreachable}), pb.ProxyResponseError_REMOTE_HOST_UNREACHABLE},
+		{"unknown status", respondSequence(&Response{Status: ResponseStatusUnknownError}), pb.ProxyResponseError_PROXY_ERROR},
+		{"unknown error", func(*ActiveRequest, int) (*Response, error) { return nil, errors.New("boom") }, pb.ProxyResponseError_PROXY_ERROR},
+		{"dropped connection", func(*ActiveRequest, int) (*Response, error) { return nil, fmt.Errorf("read: %w", io.ErrUnexpectedEOF) }, pb.ProxyResponseError_PROXY_ERROR},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			scheduler := newRequestScheduler(0, time.Second, testCase.lookup)
+			scheduler := newRequestScheduler(0, time.Second)
 			scheduler.idleInterval = 10 * time.Millisecond
 			startScheduler(t, scheduler, newFakeExit("only", testCase.respond))
 
@@ -446,7 +444,7 @@ func warmupSite(t *testing.T, warmStatus int) (*socksServer, string) {
 
 func TestGrpcWarmupEndToEnd(t *testing.T) {
 	socks, base := warmupSite(t, http.StatusOK)
-	scheduler := newRequestScheduler(0, 5*time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(0, 5*time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 	startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 	client := startGrpc(t, scheduler)
@@ -468,7 +466,7 @@ func TestGrpcWarmupEndToEnd(t *testing.T) {
 
 func TestGrpcWarmupFailedReturnsWarmupResponse(t *testing.T) {
 	socks, base := warmupSite(t, http.StatusServiceUnavailable)
-	scheduler := newRequestScheduler(0, 5*time.Second, onlineHost(true))
+	scheduler := newRequestScheduler(0, 5*time.Second)
 	scheduler.idleInterval = 10 * time.Millisecond
 	startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 
@@ -500,7 +498,7 @@ func TestGrpcTransportFailuresEndToEnd(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			socks := startSocksServer(t, "user", "secret")
-			scheduler := newRequestScheduler(0, 300*time.Millisecond, onlineHost(true))
+			scheduler := newRequestScheduler(0, 300*time.Millisecond)
 			scheduler.idleInterval = 10 * time.Millisecond
 			startScheduler(t, scheduler, newSocksProxyClient(t, socks, testLimits()))
 

@@ -75,8 +75,8 @@ func (handler *httpProxyHandler) OnRequest(ctx *httpproxy.Context, req *http.Req
 	}
 
 	proxiedResp, err := handler.scheduler.execute(req.Context(), req.URL, priority, make([]uint16, 0), warmupUrl)
-	if errors.Is(err, errHostOffline) {
-		return createStringResp("Remote host unreachable", http.StatusBadGateway)
+	if errors.Is(err, errInvalidTarget) {
+		return createStringResp("Invalid target URL", http.StatusBadRequest)
 	}
 
 	if err != nil {

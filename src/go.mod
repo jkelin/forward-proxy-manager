@@ -3,7 +3,6 @@ module scrape-proxy
 go 1.27
 
 require (
-	github.com/ReneKroon/ttlcache v1.7.0
 	github.com/andybalholm/brotli v1.2.7
 	github.com/bogdanfinn/fhttp v0.7.3
 	github.com/bogdanfinn/tls-client v1.18.0

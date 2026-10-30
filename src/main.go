@@ -19,7 +19,6 @@ type GlobalConfiguration struct {
 	RetryTimeout           time.Duration `split_words:"true" default:"5s"`
 	InitialIpInfoTimeout   time.Duration `split_words:"true" default:"10s"`
 	Retries                int           `split_words:"true" default:"1"`
-	HostInfoRequestTimeout time.Duration `split_words:"true" default:"5s"`
 	ThrottleRequestsPerMin int           `split_words:"true" default:"30"`
 	ThrottleRequestsBurst  int           `split_words:"true" default:"5"`
 	UnreachableClientRetry time.Duration `split_words:"true" default:"60s"`
@@ -66,7 +65,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	scheduler := newRequestScheduler(globalConfiguration.Retries, globalConfiguration.RequestTimeout, getHostInfo)
+	scheduler := newRequestScheduler(globalConfiguration.Retries, globalConfiguration.RequestTimeout)
 	scheduler.start(ctx)
 
 	manager := &proxyManager{

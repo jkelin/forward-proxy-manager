@@ -60,9 +60,6 @@ type ActiveRequest struct {
 	WarmupUrl *url.URL
 }
 
-// errHostOffline means the target host failed the direct reachability check, so no proxy is tried.
-var errHostOffline = errors.New("host is not reachable")
-
 // proxyExit is the scheduler's view of one proxy exit; *ProxyClient implements it.
 type proxyExit interface {
 	// RateLimit reports whether host is limited on this exit; when it is not, one request token is consumed.
@@ -79,7 +76,6 @@ type proxyExit interface {
 type RequestScheduler struct {
 	retries        int
 	requestTimeout time.Duration
-	lookupHost     func(host string) *HostInfo
 	shuffle        func(length int) []int
 	// idleInterval is the longest pause between dispatch passes when no event arrives.
 	idleInterval time.Duration
@@ -89,11 +85,10 @@ type RequestScheduler struct {
 	proxyLists   broadcast.Broadcaster
 }
 
-func newRequestScheduler(retries int, requestTimeout time.Duration, lookupHost func(host string) *HostInfo) *RequestScheduler {
+func newRequestScheduler(retries int, requestTimeout time.Duration) *RequestScheduler {
 	return &RequestScheduler{
 		retries:        retries,
 		requestTimeout: requestTimeout,
-		lookupHost:     lookupHost,
 		shuffle:        rand.Perm,
 		idleInterval:   time.Second,
 		requests:       broadcast.NewBroadcaster(1),
@@ -108,7 +103,7 @@ func (scheduler *RequestScheduler) setProxies(proxies []proxyExit) {
 }
 
 // submit queues a GET for uri; its final response arrives once on the returned channel.
-// Edge cases: a host failing the reachability check returns errHostOffline without queueing.
+// Edge cases: a URL that is not absolute http(s) returns errInvalidTarget without queueing.
 func (scheduler *RequestScheduler) submit(
 	ctx context.Context,
 	uri *url.URL,
@@ -116,9 +111,9 @@ func (scheduler *RequestScheduler) submit(
 	retryOnCodes []uint16,
 	warmupUrl *url.URL,
 ) (*ActiveRequest, <-chan *Response, error) {
-	hostInfo := scheduler.lookupHost(uri.Hostname())
-	if !hostInfo.isOnline() {
-		return nil, nil, errHostOffline
+	hostInfo, err := hostInfoFor(uri)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	callback := make(chan *Response, 1)
@@ -128,7 +123,7 @@ func (scheduler *RequestScheduler) submit(
 		Url:          uri,
 		Method:       "GET",
 		Priority:     priority,
-		Host:         *hostInfo,
+		Host:         hostInfo,
 		Status:       RequestStatusPending,
 		Callback:     callback,
 		Context:      ctx,
