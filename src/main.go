@@ -40,7 +40,7 @@ type GlobalConfiguration struct {
 	FallbackAttempts int `split_words:"true" default:"2"`
 	// BlockStatusCodes and BlockBodyPattern decide which target answers count as blocked.
 	BlockStatusCodes []int  `split_words:"true" default:"403,429"`
-	BlockBodyPattern string `split_words:"true" default:"(?i)<title>(pardon our interruption|just a moment|access denied|attention required)"`
+	BlockBodyPattern string `split_words:"true" default:"(?i)<title>(pardon our interruption|just a moment|access denied|attention required)|serviceName\\W+splashui"`
 }
 
 var globalConfiguration GlobalConfiguration

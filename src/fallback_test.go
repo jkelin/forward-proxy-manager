@@ -2,11 +2,12 @@ package main
 
 import (
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-const defaultBlockBody = "(?i)<title>(pardon our interruption|just a moment|access denied|attention required)"
+const defaultBlockBody = `(?i)<title>(pardon our interruption|just a moment|access denied|attention required)|serviceName\W+splashui`
 
 func testFallbackPolicy(t *testing.T, afterBlocks int, attempts int, retries int) *fallbackPolicy {
 	t.Helper()
@@ -17,6 +18,13 @@ func testFallbackPolicy(t *testing.T, afterBlocks int, attempts int, retries int
 	}
 
 	return policy
+}
+
+func TestBlockBodyPatternDefaultIsTheTestedOne(t *testing.T) {
+	field, _ := reflect.TypeFor[GlobalConfiguration]().FieldByName("BlockBodyPattern")
+	if tagDefault := field.Tag.Get("default"); tagDefault != defaultBlockBody {
+		t.Fatalf("BLOCK_BODY_PATTERN default is %q, tests use %q", tagDefault, defaultBlockBody)
+	}
 }
 
 func TestNewFallbackPolicyRejectsInvalidSettings(t *testing.T) {
@@ -62,6 +70,7 @@ func TestFallbackPolicyIsBlocked(t *testing.T) {
 		{"403", page(403, ""), true},
 		{"429", page(429, ""), true},
 		{"eBay interstitial with 200", page(200, "<html><head><title>Pardon Our Interruption...</title>"), true},
+		{"localized eBay interstitial", page(200, `<title>Sorry voor de onderbreking...</title><script data-inlinepayload={"loggerProps":{"serviceName":"splashui"}}>`), true},
 		{"Cloudflare challenge title", page(503, "<title>Just a moment...</title>"), true},
 		{"normal page", page(200, "<title>Xeon | eBay</title>"), false},
 		{"404", page(404, "<title>Not found</title>"), false},
