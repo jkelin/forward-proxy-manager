@@ -251,22 +251,26 @@ func TestGrpcPassesRequestFields(t *testing.T) {
 func TestGrpcPriorityOrder(t *testing.T) {
 	scheduler := newTestScheduler(0)
 	exit := newFakeExit("only", respondWith(200))
-	exit.limited = true
-	startScheduler(t, scheduler, exit)
+	// No exit yet: requests queue up, and dispatch passes skip them without touching the exit.
+	startScheduler(t, scheduler)
 	client := startGrpc(t, scheduler)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Count queued requests so all three wait behind the limited exit before it is freed one request at a time.
 	published := make(chan interface{}, 10)
 	scheduler.requests.Register(published)
 	t.Cleanup(func() { scheduler.requests.Unregister(published) })
 
+	// One host per priority: the exit's rate-limit checks then show the dispatch order. Response order would not,
+	// since dispatched attempts run concurrently.
 	done := make(chan struct{}, 3)
-	for _, priority := range []int64{1, 5, 3} {
+	for _, target := range []struct {
+		host     string
+		priority int64
+	}{{"low.test", 1}, {"high.test", 5}, {"mid.test", 3}} {
 		go func() {
-			if _, err := client.SendRequest(ctx, &pb.ProxyRequest{Url: "https://a.test/", Priority: proto.Int64(priority)}); err != nil {
+			if _, err := client.SendRequest(ctx, &pb.ProxyRequest{Url: "https://" + target.host + "/", Priority: proto.Int64(target.priority)}); err != nil {
 				t.Error(err)
 			}
 
@@ -285,10 +289,8 @@ func TestGrpcPriorityOrder(t *testing.T) {
 	// The scheduler loop may still be inserting the last request; one idle pass later the queue is complete.
 	time.Sleep(50 * time.Millisecond)
 
-	exit.lock.Lock()
-	exit.limited = false
-	exit.tokens = 1
-	exit.lock.Unlock()
+	// The exit arrives between passes, so the first pass that sees it walks the whole queue at once.
+	scheduler.setProxies([]proxyExit{exit})
 
 	for range 3 {
 		select {
@@ -296,17 +298,13 @@ func TestGrpcPriorityOrder(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("requests did not finish")
 		}
-
-		exit.lock.Lock()
-		exit.tokens = 1
-		exit.lock.Unlock()
 	}
 
 	exit.lock.Lock()
 	defer exit.lock.Unlock()
 
-	if !slices.Equal(exit.priorities, []int64{5, 3, 1}) {
-		t.Fatalf("got order %v, want [5 3 1]", exit.priorities)
+	if !slices.Equal(exit.rateChecks, []string{"high.test", "mid.test", "low.test"}) {
+		t.Fatalf("got dispatch order %v, want [high.test mid.test low.test]", exit.rateChecks)
 	}
 }
 
