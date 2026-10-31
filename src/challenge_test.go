@@ -177,6 +177,24 @@ func TestChallengeFailedSolveKeepsChallenge(t *testing.T) {
 	}
 }
 
+func TestChallengeNotChallengedSolveRetriesIdentity(t *testing.T) {
+	site := &challengeSite{}
+	server := startTargetServer(t, site)
+	solver := &fakeSolver{answer: func(*url.URL) (*challengeClearance, error) {
+		// Cloudflare stopped challenging between the identity retry and the solver's own fetch.
+		site.passIphone.Store(true)
+
+		return nil, &solverFailure{kind: "not-challenged", message: "no challenge page"}
+	}}
+	client := newChallengeClient(t, solver)
+
+	expectAnswer(t, sendChallenged(t, client, server.URL+"/a"), 200, "protected page", challengeUnchallenged)
+
+	if !client.challenges.serves("127.0.0.1") {
+		t.Fatal("a passed identity retry must serve the host with the solver identity")
+	}
+}
+
 func TestChallengeIgnoresPlainBlocks(t *testing.T) {
 	server := startTargetServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusForbidden)

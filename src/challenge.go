@@ -223,7 +223,8 @@ func (challenges *exitChallenges) send(ctx context.Context, method string, targe
 // A host is served by the solver identity after any answer below 400.
 // Edge cases: a challenge from the solver identity means its clearance expired, so it solves again; a transport
 // error on the retry or a failed solve returns challenged unchanged as "failed"; a non-challenge 4xx/5xx on the
-// retry is returned as "failed" without serving the host.
+// retry is returned as "failed" without serving the host; Cloudflare challenges intermittently, so when the
+// solver found no challenge the identity retries once more.
 func (challenges *exitChallenges) pass(callerCtx context.Context, attemptCtx context.Context, method string, target *url.URL, challenged *Response, fromSolverIdentity bool) (*Response, string) {
 	challenges.solveLock.Lock()
 	defer challenges.solveLock.Unlock()
@@ -238,20 +239,8 @@ func (challenges *exitChallenges) pass(callerCtx context.Context, attemptCtx con
 			status = challengeReused
 		}
 
-		response, err := challenges.send(attemptCtx, method, target)
-		if err != nil {
-			log.Printf("challenge retry %s: %v", target, err)
-
-			return challenged, challengeFailed
-		}
-
-		if !isChallenge(response) {
-			if response.Code >= 400 {
-				return response, challengeFailed
-			}
-
-			challenges.setServed(host, true)
-
+		response, status, done := challenges.retryIdentity(attemptCtx, method, target, challenged, status)
+		if done {
 			return response, status
 		}
 
@@ -261,6 +250,16 @@ func (challenges *exitChallenges) pass(callerCtx context.Context, attemptCtx con
 	clearance, err := challenges.config.solver.clear(callerCtx, target, challenges.proxyUrl)
 	if err != nil {
 		log.Printf("challenge solve %s: %v", target, err)
+
+		var failure *solverFailure
+		if errors.As(err, &failure) && failure.kind == "not-challenged" {
+			response, status, done := challenges.retryIdentity(callerCtx, method, target, challenged, challengeUnchallenged)
+			if done {
+				return response, status
+			}
+
+			return response, challengeFailed
+		}
 
 		return challenged, challengeFailed
 	}
@@ -272,6 +271,30 @@ func (challenges *exitChallenges) pass(callerCtx context.Context, attemptCtx con
 	}
 
 	return clearance.page, challengeSolved
+}
+
+// retryIdentity sends target with the solver identity; done is false only when it was challenged again, and then
+// response is that challenge. Any answer below 400 serves the host and returns passStatus.
+// Edge cases: a transport error returns fallback as "failed"; a non-challenge 4xx/5xx is "failed" and not served.
+func (challenges *exitChallenges) retryIdentity(ctx context.Context, method string, target *url.URL, fallback *Response, passStatus string) (response *Response, status string, done bool) {
+	response, err := challenges.send(ctx, method, target)
+	if err != nil {
+		log.Printf("challenge retry %s: %v", target, err)
+
+		return fallback, challengeFailed, true
+	}
+
+	if isChallenge(response) {
+		return response, "", false
+	}
+
+	if response.Code >= 400 {
+		return response, challengeFailed, true
+	}
+
+	challenges.setServed(target.Hostname(), true)
+
+	return response, passStatus, true
 }
 
 // processSolver runs the fpm-cfsolve binary once per challenge (see solver/src/main.rs for the contract).
