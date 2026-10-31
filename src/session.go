@@ -195,7 +195,7 @@ func (client *ProxyClient) ensureWarm(ctx context.Context, warmupUrl *url.URL, t
 	}
 
 	start := time.Now()
-	response, err := client.send(ctx, "GET", warmupUrl, client.headers)
+	response, err := send(ctx, client.httpClient, "GET", warmupUrl, client.headers)
 	if err != nil {
 		return "", nil, err
 	}

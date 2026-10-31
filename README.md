@@ -82,32 +82,47 @@ Some sites (e.g. eBay search) reject requests without a session cookie. Each pro
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `x-warmup-url: https://www.ebay.com/n/all-categories` | Absolute http(s) URL. If the chosen proxy has no session for the target host, it first GETs this URL as a typed navigation (`Sec-Fetch-Site: none`), storing its cookies. The real request then goes out as a link click: `Referer` and `Sec-Fetch-Site` derived from the warm-up URL (browser rules), plus the stored cookies. Invalid values return 400. |
 
-| Response header | Values                                                                                                                                            |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `X-Fpm-Warmup`  | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
-| `X-Fpm-Exit`    | SOCKS endpoint `host:port` from the proxy list that answered (no credentials); absent on proxy error responses                                    |
+| Response header   | Values                                                                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Fpm-Warmup`    | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
+| `X-Fpm-Exit`      | SOCKS endpoint `host:port` from the proxy list that answered (no credentials); absent on proxy error responses                                    |
+| `X-Fpm-Challenge` | Only when challenge solving is on and a Cloudflare challenge was involved: `solved`, `reused`, `unchallenged` or `failed` (see below)             |
 
 A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC uses the `warmup_url` field instead of the header (see [gRPC Proxy](#grpc-proxy)).
+
+### Cloudflare challenges
+
+With `CHALLENGE_SOLVER` set (the Docker image sets it), a Cloudflare challenge (403/503 with `cf-mitigated: challenge`) is handled on the same exit:
+
+1. The request is repeated with the solver's browser identity (iOS Safari TLS/HTTP2 fingerprint and headers from `CHALLENGE_PROFILE`). An answer below 400 is returned as `unchallenged`, or `reused` when an earlier clearance on this exit covered it.
+2. Otherwise `fpm-cfsolve` ([cfsolve](https://github.com/chris124567/cfsolve), `solver/`) solves the challenge through the same SOCKS exit and returns the protected page as `solved`. Its cookies (`cf_clearance`) go into the identity's jar.
+3. Later requests to that host on that exit use the solver identity and its cookies (`reused`), skipping warm-up. A challenge on them solves again.
+
+A failed solve returns the challenge page with `failed`. Solves run with the caller's deadline instead of `REQUEST_TIMEOUT`, at most `CHALLENGE_CONCURRENCY` at once, one at a time per exit.
 
 ## Options
 
 Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [src/main.go](src/main.go). [.env.example](.env.example) lists all variables with defaults.
 
-| Environment                 | Default                  | Description                                                                                  |
-| --------------------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
-| `PROXY_LIST_URL`            | **REQUIRED**             | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below |
-| `IP_CHECK_URL`              | `https://ifconfig.io/ip` | Absolute http(s) URL returning the exit IP; used to check proxy availability                 |
-| `REQUEST_TIMEOUT`           | `20s`                    | Timeout for individual requests to target host                                               |
-| `RETRIES`                   | `1`                      | Number of times to retry failed requests to target (`>= 0`)                                  |
-| `RETRY_TIMEOUT`             | `5s`                     | How long one proxy avoids a host after the host answered 429                                 |
-| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                    | Timeout for proxy IP info request used to check proxy availability                           |
-| `THROTTLE_REQUESTS_PER_MIN` | `30`                     | Target host max requests per minute                                                          |
-| `THROTTLE_REQUESTS_BURST`   | `5`                      | Max concurrent target requests for a single proxy                                            |
-| `UNREACHABLE_CLIENT_RETRY`  | `60s`                    | Retry for failing proxies                                                                    |
-| `ENABLE_WEB`                | `false`                  | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                    |
-| `PROXY_PORT`                | `8080`                   | HTTP(S) proxy listen port                                                                    |
-| `WEB_PORT`                  | `8081`                   | Web UI listen port                                                                           |
-| `GRPC_PORT`                 | `8082`                   | gRPC listen port                                                                             |
+| Environment                 | Default                                           | Description                                                                                  |
+| --------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `PROXY_LIST_URL`            | **REQUIRED**                                      | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below |
+| `IP_CHECK_URL`              | `https://ifconfig.io/ip`                          | Absolute http(s) URL returning the exit IP; used to check proxy availability                 |
+| `REQUEST_TIMEOUT`           | `20s`                                             | Timeout for individual requests to target host                                               |
+| `RETRIES`                   | `1`                                               | Number of times to retry failed requests to target (`>= 0`)                                  |
+| `RETRY_TIMEOUT`             | `5s`                                              | How long one proxy avoids a host after the host answered 429                                 |
+| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                                             | Timeout for proxy IP info request used to check proxy availability                           |
+| `THROTTLE_REQUESTS_PER_MIN` | `30`                                              | Target host max requests per minute                                                          |
+| `THROTTLE_REQUESTS_BURST`   | `5`                                               | Max concurrent target requests for a single proxy                                            |
+| `UNREACHABLE_CLIENT_RETRY`  | `60s`                                             | Retry for failing proxies                                                                    |
+| `ENABLE_WEB`                | `false`                                           | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                    |
+| `PROXY_PORT`                | `8080`                                            | HTTP(S) proxy listen port                                                                    |
+| `WEB_PORT`                  | `8081`                                            | Web UI listen port                                                                           |
+| `GRPC_PORT`                 | `8082`                                            | gRPC listen port                                                                             |
+| `CHALLENGE_SOLVER`          | empty (image: `/usr/local/bin/fpm-cfsolve`)       | `fpm-cfsolve` binary name or path; empty disables Cloudflare challenge solving               |
+| `CHALLENGE_PROFILE`         | `/profiles/safari-26-ios.json` (the image's copy) | cfsolve browser profile; its transport profile must have a matching TLS profile              |
+| `CHALLENGE_TIMEOUT`         | `120s`                                            | Limit for one solve                                                                          |
+| `CHALLENGE_CONCURRENCY`     | `2`                                               | Solves running at once across all exits                                                      |
 
 Proxy Manager never contacts a target directly: no DNS lookup or reachability probe leaves its own IP. Requests keep their URL scheme; a target that is down shows up as an exit error after retries.
 
@@ -193,14 +208,15 @@ cp .env.example .env   # set PROXY_LIST_URL
 just dev               # run the Go proxy with .env
 ```
 
-| Recipe              | Action                                                          |
-| ------------------- | --------------------------------------------------------------- |
-| `just codegen`      | Regenerate Go (`src/com.scrape-proxy`) and TypeScript gRPC code |
-| `just build`        | Build the Go binary (`dist/`) and the client package            |
-| `just test`         | `go test -race` and `bun test`                                  |
-| `just lint`         | oxlint (strict + anti-slop rules) and `go vet`                  |
-| `just format`       | oxfmt and gofmt                                                 |
-| `just docker-build` | Build `ghcr.io/jkelin/forward-proxy-manager:latest`             |
-| `just publish`      | Push the Docker image and publish the client to npm             |
+| Recipe              | Action                                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------------- |
+| `just codegen`      | Regenerate Go (`src/com.scrape-proxy`) and TypeScript gRPC code                                 |
+| `just build`        | Build the Go binary (`dist/`), the solver and the client package                                |
+| `just build-solver` | Build `fpm-cfsolve` into `solver/target/release` (Rust, pinned in `solver/rust-toolchain.toml`) |
+| `just test`         | `go test -race` and `bun test`                                                                  |
+| `just lint`         | oxlint (strict + anti-slop rules), `go vet` and clippy                                          |
+| `just format`       | oxfmt, gofmt and rustfmt                                                                        |
+| `just docker-build` | Build `ghcr.io/jkelin/forward-proxy-manager:latest`                                             |
+| `just publish`      | Push the Docker image and publish the client to npm                                             |
 
-The pre-commit hook runs oxfmt on staged TS/JSON/Markdown files and gofmt on staged Go files.
+The pre-commit hook runs oxfmt on staged TS/JSON/Markdown files, gofmt on staged Go files and rustfmt on staged Rust files.

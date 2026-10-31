@@ -1,0 +1,5 @@
+[toolchain]
+# cfsolve's pinned toolchain (vendor/cfsolve/rust-toolchain.toml).
+channel = "1.98.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

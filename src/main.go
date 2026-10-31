@@ -26,9 +26,41 @@ type GlobalConfiguration struct {
 	ProxyPort              uint16        `split_words:"true" default:"8080"`
 	WebPort                uint16        `split_words:"true" default:"8081"`
 	GrpcPort               uint16        `split_words:"true" default:"8082"`
+	// ChallengeSolver is the fpm-cfsolve binary (name or path); empty disables Cloudflare challenge solving.
+	ChallengeSolver      string        `split_words:"true"`
+	ChallengeProfile     string        `split_words:"true" default:"/profiles/safari-26-ios.json"`
+	ChallengeTimeout     time.Duration `split_words:"true" default:"120s"`
+	ChallengeConcurrency int64         `split_words:"true" default:"2"`
 }
 
 var globalConfiguration GlobalConfiguration
+
+// loadChallengeConfig builds challenge solving from CHALLENGE_*; nil when CHALLENGE_SOLVER is empty.
+// Invalid settings stop the service instead of silently disabling solving.
+func loadChallengeConfig() *challengeConfig {
+	if globalConfiguration.ChallengeSolver == "" {
+		return nil
+	}
+
+	identity, err := loadSolverIdentity(globalConfiguration.ChallengeProfile)
+	if err != nil {
+		log.Fatalf("CHALLENGE_PROFILE: %v", err)
+	}
+
+	solver, err := newProcessSolver(
+		globalConfiguration.ChallengeSolver,
+		identity.profilePath,
+		globalConfiguration.ChallengeTimeout,
+		globalConfiguration.ChallengeConcurrency,
+	)
+	if err != nil {
+		log.Fatalf("CHALLENGE_SOLVER: %v", err)
+	}
+
+	log.Printf("Cloudflare challenges solved by %s as %s", solver.binary, identity.profilePath)
+
+	return &challengeConfig{solver: solver, identity: identity}
+}
 
 func main() {
 	// A missing .env is fine: the environment alone may configure the service.
@@ -76,6 +108,7 @@ func main() {
 		newProfile:     randomBrowserProfile,
 		publish:        scheduler.setProxies,
 		maxConcurrency: 20,
+		challenges:     loadChallengeConfig(),
 	}
 
 	go func() {

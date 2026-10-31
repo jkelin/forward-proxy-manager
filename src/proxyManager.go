@@ -84,7 +84,9 @@ func (client *ProxyClient) handleError(callerCtx context.Context, method string,
 }
 
 // makeRequestWithClient sends req through this exit, warming the session first when req asks for it.
+// A Cloudflare challenge goes to the exit's challenge handling, when enabled; hosts it already passed use its identity.
 // The target scheme is req.Url's own; req.Url itself is never modified.
+// Edge cases: hosts served by the challenge identity skip warm-up, since that identity keeps its own session.
 func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout time.Duration) (*Response, error) {
 	start := time.Now()
 
@@ -94,35 +96,45 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 	target := *req.Url
 	target.Host = withoutDefaultPort(&target)
 
-	headers := client.headers
+	served := client.challenges != nil && client.challenges.serves(target.Hostname())
 	warmupStatus := ""
 
-	if req.WarmupUrl != nil {
-		status, failedResponse, err := client.ensureWarm(requestCtx, req.WarmupUrl, &target)
-		if err != nil {
-			return client.handleError(req.Context, req.Method, req.WarmupUrl, err)
+	var response *Response
+	var err error
+
+	if served {
+		response, err = client.challenges.send(requestCtx, req.Method, &target)
+	} else {
+		headers := client.headers
+
+		if req.WarmupUrl != nil {
+			status, failedResponse, err := client.ensureWarm(requestCtx, req.WarmupUrl, &target)
+			if err != nil {
+				return client.handleError(req.Context, req.Method, req.WarmupUrl, err)
+			}
+
+			if failedResponse != nil {
+				client.resetSession()
+				failedResponse.Headers.Set(warmupStatusHeader, status)
+				failedResponse.Headers.Set(exitHeader, client.exit)
+
+				return failedResponse, nil
+			}
+
+			warmupStatus = status
+			headers = navigationHeaders(headers, req.WarmupUrl, &target)
 		}
 
-		if failedResponse != nil {
-			client.resetSession()
-			failedResponse.Headers.Set(warmupStatusHeader, status)
-			failedResponse.Headers.Set(exitHeader, client.exit)
-
-			return failedResponse, nil
-		}
-
-		warmupStatus = status
-		headers = navigationHeaders(headers, req.WarmupUrl, &target)
+		response, err = send(requestCtx, client.httpClient, req.Method, &target, headers)
 	}
 
-	response, err := client.send(requestCtx, req.Method, &target, headers)
 	if err != nil {
 		return client.handleError(req.Context, req.Method, &target, err)
 	}
 
 	log.Printf("%dp %s %s %s %d %s, %dms", req.Priority, client.id, req.Method, target.String(), response.Code, bytesize.New(float64(len(response.Body))), time.Since(start).Milliseconds())
 
-	if req.WarmupUrl != nil {
+	if req.WarmupUrl != nil && !served {
 		if isSessionRejected(response.Code, true) {
 			client.resetSession()
 		}
@@ -130,14 +142,26 @@ func (client *ProxyClient) makeRequestWithClient(req *ActiveRequest, timeout tim
 		response.Headers.Set(warmupStatusHeader, warmupStatus)
 	}
 
+	if client.challenges != nil {
+		if isChallenge(response) {
+			passed, status := client.challenges.pass(req.Context, requestCtx, req.Method, &target, response, served)
+			log.Printf("%s challenge %s %s, %dms", client.id, target.String(), status, time.Since(start).Milliseconds())
+
+			response = passed
+			response.Headers.Set(challengeStatusHeader, status)
+		} else if served {
+			response.Headers.Set(challengeStatusHeader, challengeReused)
+		}
+	}
+
 	response.Headers.Set(exitHeader, client.exit)
 
 	return response, nil
 }
 
-// send performs one request with the given headers; cookies come from and go to the client's jar.
-// Only Content-Type and Content-Disposition are passed back to callers.
-func (client *ProxyClient) send(ctx context.Context, method string, target *url.URL, headers fhttp.Header) (*Response, error) {
+// send performs one request through httpClient with the given headers; cookies come from and go to that client's jar.
+// Only Content-Type, Content-Disposition and Cloudflare's Cf-Mitigated are passed back to callers.
+func send(ctx context.Context, httpClient tls_client.HttpClient, method string, target *url.URL, headers fhttp.Header) (*Response, error) {
 	request, err := fhttp.NewRequestWithContext(ctx, method, target.String(), nil)
 	if err != nil {
 		return nil, err
@@ -146,7 +170,7 @@ func (client *ProxyClient) send(ctx context.Context, method string, target *url.
 	request.Header = headers.Clone()
 
 	// tls-client negotiates h2/http1.1 via the profile's ALPN, like the impersonated browser.
-	resp, err := client.httpClient.Do(request)
+	resp, err := httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +204,10 @@ func (client *ProxyClient) send(ctx context.Context, method string, target *url.
 
 	if contentDisposition := resp.Header.Get("Content-Disposition"); contentDisposition != "" {
 		response.Headers.Set("Content-Disposition", contentDisposition)
+	}
+
+	if mitigated := resp.Header.Get(cfMitigatedHeader); mitigated != "" {
+		response.Headers.Set(cfMitigatedHeader, mitigated)
 	}
 
 	return &response, nil
@@ -300,6 +328,10 @@ type ProxyClient struct {
 	warmedHosts map[string]struct{}
 	limiter     *throttled.GCRARateLimiterCtx
 	limits      exitLimits
+	// transportOptions are the caller's client options (proxy, TLS verification), reused by challenge handling.
+	transportOptions []tls_client.HttpClientOption
+	// challenges passes Cloudflare challenges on this exit; nil disables it.
+	challenges *exitChallenges
 	// availabilityLock guards unreachableUntil and backoffUntil.
 	availabilityLock sync.Mutex
 	unreachableUntil time.Time
@@ -337,12 +369,35 @@ func newProxyClient(exit string, profile profiles.ClientProfile, limits exitLimi
 	}
 
 	cookies := newSessionJar()
+
+	httpClient, err := newIdentityClient(profile, cookies, options)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProxyClient{
+		id:               exit,
+		exit:             exit,
+		httpClient:       httpClient,
+		headers:          getFakeHeaders(profile),
+		cookies:          cookies,
+		warmedHosts:      make(map[string]struct{}),
+		limiter:          limiter,
+		limits:           limits,
+		transportOptions: slices.Clone(options),
+		backoffUntil:     make(map[string]time.Time),
+	}, nil
+}
+
+// newIdentityClient builds an HTTP client with profile's TLS/HTTP2 fingerprint, storing cookies in jar.
+// transportOptions (proxy, TLS verification) come first and are not modified.
+func newIdentityClient(profile profiles.ClientProfile, jar *sessionJar, transportOptions []tls_client.HttpClientOption) (tls_client.HttpClient, error) {
 	idleConnTimeout := 60 * time.Second
 
-	options = append(options,
+	options := append(slices.Clone(transportOptions),
 		tls_client.WithClientProfile(profile),
 		tls_client.WithTimeoutSeconds(10),
-		tls_client.WithCookieJar(cookies),
+		tls_client.WithCookieJar(jar),
 		tls_client.WithTransportOptions(&tls_client.TransportOptions{
 			MaxIdleConns:    1024,
 			MaxConnsPerHost: 12,
@@ -353,22 +408,7 @@ func newProxyClient(exit string, profile profiles.ClientProfile, limits exitLimi
 		options = append(options, tls_client.WithRandomTLSExtensionOrder())
 	}
 
-	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
-	if err != nil {
-		return nil, err
-	}
-
-	return &ProxyClient{
-		id:           exit,
-		exit:         exit,
-		httpClient:   httpClient,
-		headers:      getFakeHeaders(profile),
-		cookies:      cookies,
-		warmedHosts:  make(map[string]struct{}),
-		limiter:      limiter,
-		limits:       limits,
-		backoffUntil: make(map[string]time.Time),
-	}, nil
+	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 }
 
 func (client *ProxyClient) markUnreachable() {
@@ -453,6 +493,8 @@ type proxyManager struct {
 	// publish receives the full list of ready exits every time one more becomes ready.
 	publish        func([]proxyExit)
 	maxConcurrency int64
+	// challenges enables Cloudflare challenge solving on every exit; nil disables it.
+	challenges *challengeConfig
 }
 
 // connect builds the exit for config and names it after its public IP.
@@ -472,6 +514,12 @@ func (manager *proxyManager) connect(ctx context.Context, config ProxyConfig) (*
 	client, err := newProxyClient(net.JoinHostPort(config.host, strconv.FormatInt(config.port, 10)), profile, manager.limits, options...)
 	if err != nil {
 		return nil, err
+	}
+
+	if manager.challenges != nil {
+		if err := client.enableChallenges(manager.challenges, proxyUrl.String()); err != nil {
+			return nil, err
+		}
 	}
 
 	ip, err := getExternalProxyIp(ctx, client, manager.ipCheckUrl, manager.ipCheckTimeout)

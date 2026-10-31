@@ -20,13 +20,18 @@ codegen-go:
 codegen-ts:
     bun run --bun codegen
 
-# Build the Go proxy binary and the client package
-build: build-go build-client
+# Build the Go proxy binary, the challenge solver and the client package
+build: build-go build-solver build-client
 
 # Build the Go proxy binary into dist/
 [working-directory("src")]
 build-go:
     go build -o ../dist/forward-proxy-manager .
+
+# Build the Cloudflare challenge solver (fpm-cfsolve) into solver/target/release
+[working-directory("solver")]
+build-solver:
+    cargo build --release --locked
 
 # Build the client package into packages/client/dist
 [working-directory("packages/client")]
@@ -53,9 +58,9 @@ lint:
 format:
     bun run format
 
-# Build the Docker image
+# Build the Docker image (context: repository root, for the solver and vendor/cfsolve)
 docker-build:
-    docker build -t {{ image }} ./src
+    docker build -f src/Dockerfile -t {{ image }} .
 
 # Push the Docker image and publish the client to npm
 publish: publish-docker publish-client

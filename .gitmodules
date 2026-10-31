@@ -1,0 +1,3 @@
+[submodule "vendor/cfsolve"]
+	path = vendor/cfsolve
+	url = https://github.com/chris124567/cfsolve

@@ -1,0 +1,27 @@
+[package]
+name = "fpm-cfsolve"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "fpm-cfsolve"
+path = "src/main.rs"
+
+[dependencies]
+# Solver only: the default "internals" feature adds cfsolve's analysis tools and capture proxy.
+cfsolve = { path = "../vendor/cfsolve", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+url = { version = "2.5.8", features = ["serde"] }
+
+# Cargo reads patches only from the top-level manifest; these mirror cfsolve's own.
+[patch.crates-io]
+btls-sys = { path = "../vendor/cfsolve/vendor/btls-sys" }
+wreq = { path = "../vendor/cfsolve/vendor/wreq" }
+http2 = { path = "../vendor/cfsolve/vendor/http2" }
+
+[profile.release]
+strip = true

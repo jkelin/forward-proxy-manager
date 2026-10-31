@@ -6,12 +6,14 @@
   ],
   "type": "module",
   "scripts": {
-    "lint": "bun run --parallel lint:ts lint:go",
+    "lint": "bun run --parallel lint:ts lint:go lint:rust",
     "lint:ts": "bun run --parallel --filter './packages/*' lint",
     "lint:go": "go vet -C src ./...",
-    "format": "bun run --parallel format:ts format:go",
+    "lint:rust": "cargo clippy --manifest-path solver/Cargo.toml --release -- -D warnings",
+    "format": "bun run --parallel format:ts format:go format:rust",
     "format:ts": "oxfmt .",
     "format:go": "gofmt -w src",
+    "format:rust": "cargo fmt --manifest-path solver/Cargo.toml",
     "test": "bun run --parallel test:ts test:go",
     "test:ts": "bun run --parallel --filter './packages/*' test",
     "test:go": "go test -C src -race ./...",
@@ -26,6 +28,7 @@
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json,jsonc,md,yml,yaml,toml,css,html}": "oxfmt --no-error-on-unmatched-pattern",
-    "*.go": "gofmt -w"
+    "*.go": "gofmt -w",
+    "*.rs": "rustfmt --edition 2024"
   }
 }
