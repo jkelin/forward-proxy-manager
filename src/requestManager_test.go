@@ -351,7 +351,7 @@ func TestDispatchPriorityOrder(t *testing.T) {
 	exit.tokens = 3
 	exit.retryAfter = 4 * time.Millisecond
 
-	wait := scheduler.dispatch(queue, []proxyExit{exit})
+	wait := scheduler.dispatch(queue, exitPools{primary: []proxyExit{exit}})
 
 	// Highest priority first, ties by age; the exit has 3 tokens, so the last two stay queued.
 	expectedChecks := []string{"r1.test", "r3.test", "r4.test", "r0.test", "r2.test"}
@@ -405,7 +405,7 @@ func TestDispatchWait(t *testing.T) {
 				proxies = append(proxies, exit)
 			}
 
-			if wait := scheduler.dispatch(queue, proxies); wait != testCase.expected {
+			if wait := scheduler.dispatch(queue, exitPools{primary: proxies}); wait != testCase.expected {
 				t.Fatalf("got %v, want %v", wait, testCase.expected)
 			}
 
@@ -434,7 +434,7 @@ func TestDispatchDropsCancelled(t *testing.T) {
 
 	exit := newFakeExit("only", respondWith(200))
 	exit.limited = true
-	scheduler.dispatch(queue, []proxyExit{exit})
+	scheduler.dispatch(queue, exitPools{primary: []proxyExit{exit}})
 
 	if queue.Len() != 1 || !queue.Has(live) {
 		t.Fatal("only the cancelled request may be removed")
@@ -475,7 +475,7 @@ func TestDispatchShufflesExits(t *testing.T) {
 
 	queue := btree.NewG(32, requestOrder)
 	queue.ReplaceOrInsert(queuedRequest(0, 0, context.Background()))
-	scheduler.dispatch(queue, []proxyExit{first, second, third})
+	scheduler.dispatch(queue, exitPools{primary: []proxyExit{first, second, third}})
 
 	if len(third.rateChecks) != 1 || len(second.rateChecks) != 1 || len(first.rateChecks) != 0 {
 		t.Fatalf("exits must be tried in shuffled order until one is free: %v %v %v", first.rateChecks, second.rateChecks, third.rateChecks)

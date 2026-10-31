@@ -58,6 +58,11 @@ type ActiveRequest struct {
 	RetryOnCodes []uint16
 	// WarmupUrl (x-warmup-url) is visited first by proxies without a session for Url's host; nil disables sessions.
 	WarmupUrl *url.URL
+	// Pool is the proxy list the request is dispatched to; it moves to poolFallback after enough blocks.
+	Pool proxyPool
+	// PrimaryBlocks and FallbackBlocks count blocked attempts per pool (see fallbackPolicy).
+	PrimaryBlocks  int
+	FallbackBlocks int
 }
 
 // proxyExit is the scheduler's view of one proxy exit; *ProxyClient implements it.
@@ -83,6 +88,10 @@ type RequestScheduler struct {
 	requests     broadcast.Broadcaster
 	finished     broadcast.Broadcaster
 	proxyLists   broadcast.Broadcaster
+	// fallback moves blocked requests to the fallback pool; nil disables it.
+	fallback *fallbackPolicy
+	// fallbackReady counts ready fallback exits, so requests only move once one exists.
+	fallbackReady atomic.Int64
 }
 
 func newRequestScheduler(retries int, requestTimeout time.Duration) *RequestScheduler {
@@ -97,9 +106,15 @@ func newRequestScheduler(retries int, requestTimeout time.Duration) *RequestSche
 	}
 }
 
-// setProxies replaces the exits the scheduler dispatches to.
+// setProxies replaces the primary exits the scheduler dispatches to.
 func (scheduler *RequestScheduler) setProxies(proxies []proxyExit) {
-	scheduler.proxyLists.Submit(proxies)
+	scheduler.proxyLists.Submit(poolUpdate{pool: poolPrimary, exits: proxies})
+}
+
+// setFallbackProxies replaces the fallback exits, used by requests the fallback policy moved.
+func (scheduler *RequestScheduler) setFallbackProxies(proxies []proxyExit) {
+	scheduler.fallbackReady.Store(int64(len(proxies)))
+	scheduler.proxyLists.Submit(poolUpdate{pool: poolFallback, exits: proxies})
 }
 
 // submit queues a GET for uri; its final response arrives once on the returned channel.
@@ -168,6 +183,8 @@ const (
 	decisionRetry
 	// decisionRequeue re-queues without using a retry: the exit failed, not the request.
 	decisionRequeue
+	// decisionFallback re-queues on the fallback pool without using a retry (see fallbackPolicy.decide).
+	decisionFallback
 )
 
 // classifyAttempt decides what follows one attempt and which response the caller gets if it ends here.
@@ -230,7 +247,15 @@ func (scheduler *RequestScheduler) attempt(request *ActiveRequest, proxy proxyEx
 	}
 
 	request.Lock.Lock()
-	requeue := decision == decisionRequeue || (decision == decisionRetry && int(request.Retries) < scheduler.retries)
+	pool := request.Pool
+	decision = scheduler.fallback.decide(request, final, decision, scheduler.fallbackReady.Load() > 0)
+	if decision == decisionFallback && pool == poolPrimary {
+		log.Printf("%s blocked %d times on the primary pool, moving to the fallback pool", request.Url, request.PrimaryBlocks)
+	}
+
+	requeue := decision == decisionRequeue ||
+		decision == decisionFallback ||
+		(decision == decisionRetry && int(request.Retries) < scheduler.retries)
 	if requeue {
 		if decision == decisionRetry {
 			request.Retries++
@@ -245,6 +270,10 @@ func (scheduler *RequestScheduler) attempt(request *ActiveRequest, proxy proxyEx
 
 	request.Status = RequestStatusFinished
 	request.Lock.Unlock()
+
+	if scheduler.fallback != nil && final.Headers != nil {
+		final.Headers.Set(poolHeader, pool.String())
+	}
 
 	request.Callback <- final
 	scheduler.finished.Submit(request)
@@ -269,11 +298,11 @@ func requestOrder(first *ActiveRequest, second *ActiveRequest) bool {
 	return first.Id < second.Id
 }
 
-// dispatch starts every queued request that has a free exit, highest priority first, and returns the pause
-// before the next pass.
+// dispatch starts every queued request that has a free exit in its pool, highest priority first, and returns
+// the pause before the next pass.
 // Edge cases: requests with a done ctx are dropped; exits are tried in shuffled order; the pause is the shortest
 // positive rate-limit hint, capped at idleInterval.
-func (scheduler *RequestScheduler) dispatch(queue *btree.BTreeG[*ActiveRequest], proxies []proxyExit) time.Duration {
+func (scheduler *RequestScheduler) dispatch(queue *btree.BTreeG[*ActiveRequest], pools exitPools) time.Duration {
 	type assignment struct {
 		request *ActiveRequest
 		proxy   proxyExit
@@ -289,6 +318,7 @@ func (scheduler *RequestScheduler) dispatch(queue *btree.BTreeG[*ActiveRequest],
 			return true
 		}
 
+		proxies := pools.of(request.Pool)
 		for _, index := range scheduler.shuffle(len(proxies)) {
 			proxy := proxies[index]
 
@@ -366,7 +396,7 @@ func (scheduler *RequestScheduler) start(ctx context.Context) <-chan struct{} {
 
 func (scheduler *RequestScheduler) loop(ctx context.Context, requests <-chan interface{}, proxyLists <-chan interface{}) {
 	queue := btree.NewG(32, requestOrder)
-	proxies := make([]proxyExit, 0)
+	pools := exitPools{}
 	timer := time.NewTimer(scheduler.idleInterval)
 	defer timer.Stop()
 
@@ -376,11 +406,16 @@ func (scheduler *RequestScheduler) loop(ctx context.Context, requests <-chan int
 			return
 		case request := <-requests:
 			queue.ReplaceOrInsert(request.(*ActiveRequest))
-		case list := <-proxyLists:
-			proxies = list.([]proxyExit)
+		case message := <-proxyLists:
+			update := message.(poolUpdate)
+			if update.pool == poolFallback {
+				pools.fallback = update.exits
+			} else {
+				pools.primary = update.exits
+			}
 		case <-timer.C:
 		}
 
-		timer.Reset(scheduler.dispatch(queue, proxies))
+		timer.Reset(scheduler.dispatch(queue, pools))
 	}
 }

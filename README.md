@@ -87,6 +87,7 @@ Some sites (e.g. eBay search) reject requests without a session cookie. Each pro
 | `X-Fpm-Warmup`    | `fresh` (warm-up just ran), `reused` (existing session), `failed` (warm-up was not 2xx; its response is returned and the real request is skipped) |
 | `X-Fpm-Exit`      | SOCKS endpoint `host:port` from the proxy list that answered (no credentials); absent on proxy error responses                                    |
 | `X-Fpm-Challenge` | Only when challenge solving is on and a Cloudflare challenge was involved: `solved`, `reused`, `unchallenged` or `failed` (see below)             |
+| `X-Fpm-Pool`      | Only when `FALLBACK_PROXY_LIST_URL` is set: `primary` or `fallback`, the proxy list of the exit that answered (see below)                         |
 
 A 403 from the warm-up or the real request clears that proxy's cookies and retries on another proxy (`RETRIES`). Cookies are stored and sent per proxy for every request; without `x-warmup-url` there is no warm-up, no `Referer` and no retry on 403. Client `Cookie` headers are never forwarded. gRPC uses the `warmup_url` field instead of the header (see [gRPC Proxy](#grpc-proxy)).
 
@@ -100,29 +101,44 @@ With `CHALLENGE_SOLVER` set (the Docker image sets it), a Cloudflare challenge (
 
 A failed solve returns the challenge page with `failed`. Solves run with the caller's deadline instead of `REQUEST_TIMEOUT`, at most `CHALLENGE_CONCURRENCY` at once, one at a time per exit.
 
+### Fallback proxy list
+
+With `FALLBACK_PROXY_LIST_URL` set, a second list (e.g. residential proxies) takes requests that the primary list keeps getting blocked on. A target answer is _blocked_ when its status is in `BLOCK_STATUS_CODES` or the first 128 KiB of its body match `BLOCK_BODY_PATTERN` (default: the titles of eBay's "Pardon Our Interruption", Cloudflare's "Just a moment", Akamai's "Access Denied" and Cloudflare's "Attention Required" pages). Proxy failures and timeouts are not blocks.
+
+1. A blocked primary attempt retries on another primary exit; it uses `RETRIES`.
+2. After `FALLBACK_AFTER_BLOCKS` blocked primary attempts the request moves to the fallback list, if one fallback exit is ready.
+3. Blocked fallback attempts retry on fallback exits, without using `RETRIES`, until `FALLBACK_ATTEMPTS` of them were blocked; then the last block is returned.
+
+Only blocked requests reach the fallback list, so its bandwidth tracks the primary list's block rate. Fallback exits get the same warm-up sessions, challenge solving and rate limits.
+
 ## Options
 
 Set up the Proxy Manager using environment variables. Only PROXY_LIST_URL is mandatory. For detailed definitions, see [src/main.go](src/main.go). [.env.example](.env.example) lists all variables with defaults.
 
-| Environment                 | Default                                           | Description                                                                                  |
-| --------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `PROXY_LIST_URL`            | **REQUIRED**                                      | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below |
-| `IP_CHECK_URL`              | `https://ifconfig.io/ip`                          | Absolute http(s) URL returning the exit IP; used to check proxy availability                 |
-| `REQUEST_TIMEOUT`           | `20s`                                             | Timeout for individual requests to target host                                               |
-| `RETRIES`                   | `1`                                               | Number of times to retry failed requests to target (`>= 0`)                                  |
-| `RETRY_TIMEOUT`             | `5s`                                              | How long one proxy avoids a host after the host answered 429                                 |
-| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                                             | Timeout for proxy IP info request used to check proxy availability                           |
-| `THROTTLE_REQUESTS_PER_MIN` | `30`                                              | Target host max requests per minute                                                          |
-| `THROTTLE_REQUESTS_BURST`   | `5`                                               | Max concurrent target requests for a single proxy                                            |
-| `UNREACHABLE_CLIENT_RETRY`  | `60s`                                             | Retry for failing proxies                                                                    |
-| `ENABLE_WEB`                | `false`                                           | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                    |
-| `PROXY_PORT`                | `8080`                                            | HTTP(S) proxy listen port                                                                    |
-| `WEB_PORT`                  | `8081`                                            | Web UI listen port                                                                           |
-| `GRPC_PORT`                 | `8082`                                            | gRPC listen port                                                                             |
-| `CHALLENGE_SOLVER`          | empty (image: `/usr/local/bin/fpm-cfsolve`)       | `fpm-cfsolve` binary name or path; empty disables Cloudflare challenge solving               |
-| `CHALLENGE_PROFILE`         | `/profiles/safari-26-ios.json` (the image's copy) | cfsolve browser profile; its transport profile must have a matching TLS profile              |
-| `CHALLENGE_TIMEOUT`         | `120s`                                            | Limit for one solve                                                                          |
-| `CHALLENGE_CONCURRENCY`     | `2`                                               | Solves running at once across all exits                                                      |
+| Environment                 | Default                                                                                  | Description                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `PROXY_LIST_URL`            | **REQUIRED**                                                                             | Absolute http(s) URL from which to download the proxy list. Refer to proxy list format below |
+| `IP_CHECK_URL`              | `https://ifconfig.io/ip`                                                                 | Absolute http(s) URL returning the exit IP; used to check proxy availability                 |
+| `REQUEST_TIMEOUT`           | `20s`                                                                                    | Timeout for individual requests to target host                                               |
+| `RETRIES`                   | `1`                                                                                      | Number of times to retry failed requests to target (`>= 0`)                                  |
+| `RETRY_TIMEOUT`             | `5s`                                                                                     | How long one proxy avoids a host after the host answered 429                                 |
+| `INITIAL_IP_INFO_TIMEOUT`   | `10s`                                                                                    | Timeout for proxy IP info request used to check proxy availability                           |
+| `THROTTLE_REQUESTS_PER_MIN` | `30`                                                                                     | Target host max requests per minute                                                          |
+| `THROTTLE_REQUESTS_BURST`   | `5`                                                                                      | Max concurrent target requests for a single proxy                                            |
+| `UNREACHABLE_CLIENT_RETRY`  | `60s`                                                                                    | Retry for failing proxies                                                                    |
+| `ENABLE_WEB`                | `false`                                                                                  | Enable web UI on `WEB_PORT` for monitoring and debugging pending requests                    |
+| `PROXY_PORT`                | `8080`                                                                                   | HTTP(S) proxy listen port                                                                    |
+| `WEB_PORT`                  | `8081`                                                                                   | Web UI listen port                                                                           |
+| `GRPC_PORT`                 | `8082`                                                                                   | gRPC listen port                                                                             |
+| `CHALLENGE_SOLVER`          | empty (image: `/usr/local/bin/fpm-cfsolve`)                                              | `fpm-cfsolve` binary name or path; empty disables Cloudflare challenge solving               |
+| `CHALLENGE_PROFILE`         | `/profiles/safari-26-ios.json` (the image's copy)                                        | cfsolve browser profile; its transport profile must have a matching TLS profile              |
+| `CHALLENGE_TIMEOUT`         | `120s`                                                                                   | Limit for one solve                                                                          |
+| `CHALLENGE_CONCURRENCY`     | `2`                                                                                      | Solves running at once across all exits                                                      |
+| `FALLBACK_PROXY_LIST_URL`   | empty                                                                                    | Second proxy list (same format) for blocked requests; empty disables the fallback            |
+| `FALLBACK_AFTER_BLOCKS`     | `2`                                                                                      | Blocked primary attempts that move a request to the fallback list (`1` to `RETRIES + 1`)     |
+| `FALLBACK_ATTEMPTS`         | `2`                                                                                      | Blocked fallback attempts before the block is returned (`>= 1`)                              |
+| `BLOCK_STATUS_CODES`        | `403,429`                                                                                | Target status codes that count as blocked                                                    |
+| `BLOCK_BODY_PATTERN`        | `(?i)<title>(pardon our interruption\|just a moment\|access denied\|attention required)` | Go regexp; a body match counts as blocked; empty disables body matching                      |
 
 Proxy Manager never contacts a target directly: no DNS lookup or reachability probe leaves its own IP. Requests keep their URL scheme; a target that is down shows up as an exit error after retries.
 
